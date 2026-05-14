@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 3.0.0
+#   版本   : 1.0.1
+#   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS
 #   系统   : Alpine(OpenRC) / Debian / Ubuntu / CentOS / RHEL /
@@ -26,7 +27,8 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="3.0.0"
+VOLSB_VER="1.0.1"
+VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 SB_BIN="/usr/local/bin/sing-box"
 SB_CONF_DIR="/etc/sing-box"
 SB_CONFIG="${SB_CONF_DIR}/config.json"
@@ -1158,17 +1160,101 @@ do_uninstall() {
     info "卸载完成"
 }
 
-do_update() {
+# ────── 升级 sing-box 核心 ──────
+do_update_singbox() {
     require_root
     [[ -x "$SB_BIN" ]] || die "sing-box 未安装"
     detect_arch
     local cur new
     cur=$("$SB_BIN" version | awk '{print $3}' | head -1)
     new=$(get_latest_version)
-    [[ "$cur" == "$new" ]] && { info "已是最新版本 v${cur}"; return; }
-    info "升级: v${cur} → v${new}"
+    if [[ "$cur" == "$new" ]]; then
+        info "sing-box 已是最新版本 v${cur}"; return
+    fi
+    info "升级 sing-box: v${cur} → v${new}"
     install_binary "$new"
-    svc_restart && info "升级完成 ✔"
+    svc_restart && info "sing-box 升级完成 ✔"
+}
+
+# ────── 升级 VOLSB 脚本自身 ──────
+do_update_script() {
+    require_root
+    step "更新 VOLSB 脚本"
+
+    # 获取远端版本号
+    local remote_ver
+    info "检查远端版本 ..."
+    remote_ver=$(curl -fsSL --max-time 10 "$VOLSB_REPO" 2>/dev/null \
+        | grep -m1 'VOLSB_VER=' | sed 's/.*VOLSB_VER="\([^"]*\)".*/\1/')
+
+    if [[ -z "$remote_ver" ]]; then
+        die "无法获取远端版本信息,请检查网络或仓库地址:\n  $VOLSB_REPO"
+    fi
+
+    if [[ "$remote_ver" == "$VOLSB_VER" ]]; then
+        info "VOLSB 已是最新版本 v${VOLSB_VER}"; return
+    fi
+
+    info "发现新版本: v${VOLSB_VER} → v${remote_ver}"
+    ask "确认更新? [Y/n]: "; read -r ans
+    [[ "$ans" =~ ^[Nn]$ ]] && { info "已取消"; return; }
+
+    # 下载到临时文件,校验后替换
+    local self; self=$(readlink -f "$0")
+    local tmpfile; tmpfile=$(mktemp)
+
+    info "下载新版脚本 ..."
+    if ! curl -fsSL --max-time 60 -o "$tmpfile" "$VOLSB_REPO"; then
+        rm -f "$tmpfile"
+        die "下载失败: $VOLSB_REPO"
+    fi
+
+    # 基本完整性校验:确认是 bash 脚本且包含关键标识
+    if ! grep -q "VOLSB_VER=" "$tmpfile" || ! head -1 "$tmpfile" | grep -q "bash"; then
+        rm -f "$tmpfile"
+        die "下载内容校验失败,中止更新"
+    fi
+
+    # 备份当前脚本
+    local backup="${self}.bak.${VOLSB_VER}"
+    cp "$self" "$backup"
+    info "当前版本已备份: $backup"
+
+    # 替换脚本
+    chmod +x "$tmpfile"
+    mv "$tmpfile" "$self"
+
+    # 同步更新 /usr/local/bin/volsb 快捷命令(重写指向自身)
+    if [[ -f "$VOLSB_CMD" ]]; then
+        cat > "$VOLSB_CMD" <<SHORTCUT
+#!/usr/bin/env bash
+exec bash "${self}" "\$@"
+SHORTCUT
+        chmod +x "$VOLSB_CMD"
+    fi
+
+    info "VOLSB 已更新至 v${remote_ver} ✔"
+    warn "脚本已重新加载,请重新运行: ${C_BOLD}volsb${NC}"
+    exit 0
+}
+
+# ────── 统一更新入口(菜单调用) ──────
+do_update_menu() {
+    echo ""
+    echo -e "  ${C_BOLD}选择更新内容:${NC}"
+    hr
+    printf "  ${C_BOLD}%-5s${NC} %s\n" "1)" "更新 VOLSB 脚本  (当前 v${VOLSB_VER})"
+    printf "  ${C_BOLD}%-5s${NC} %s\n" "2)" "升级 sing-box 核心版本"
+    printf "  ${C_BOLD}%-5s${NC} %s\n" "3)" "全部更新"
+    printf "  ${C_BOLD}%-5s${NC} %s\n" "0)" "取消"
+    hr
+    ask "选择 [0-3]: "; read -r uc
+    case "$uc" in
+        1) do_update_script ;;
+        2) do_update_singbox ;;
+        3) do_update_script; do_update_singbox ;;
+        *) info "已取消" ;;
+    esac
 }
 
 # ════════════════════════════════════════════════════════════
@@ -1192,7 +1278,7 @@ main_menu() {
    ╚████╔╝ ╚██████╔╝███████╗███████║██████╔╝
     ╚═══╝   ╚═════╝ ╚══════╝╚══════╝╚═════╝
 LOGO
-        echo -e "  ${C_DIM}v${VOLSB_VER}  |  $(date '+%Y-%m-%d %H:%M:%S')${NC}"
+        echo -e "  ${C_DIM}v${VOLSB_VER}  |  $(date '+%Y-%m-%d %H:%M:%S')  |  ${VOLSB_REPO##*/}${NC}"
         echo -e "${NC}"
 
         # 状态栏
@@ -1212,7 +1298,7 @@ LOGO
         echo -e "  ${C_BOLD}📦 安装管理${NC}"
         echo "   1) 全新安装 / 重新部署"
         echo "   2) 追加新协议"
-        echo "   3) 升级至最新版本"
+        echo "   3) 更新 (脚本/sing-box)"
         echo "   4) 卸载"
         echo ""
         echo -e "  ${C_BOLD}⚙️  服务控制${NC}"
@@ -1236,7 +1322,7 @@ LOGO
             1)  do_install ;;
             2)  require_root; ask_connect_addr; select_protocols; assemble_and_write_config
                 svc_restart && info "配置已更新" ;;
-            3)  do_update ;;
+            3)  do_update_menu ;;
             4)  do_uninstall ;;
             5)  require_root; svc_start  && info "已启动" ;;
             6)  require_root; svc_stop   && info "已停止" ;;
@@ -1266,6 +1352,7 @@ LOGO
 print_help() {
     cat <<HELP
 VOLSB — sing-box 服务端部署管理脚本 v${VOLSB_VER}
+项目地址: https://github.com/chnnic/VOLSB
 
 用法:
   volsb [命令]
@@ -1275,7 +1362,8 @@ VOLSB — sing-box 服务端部署管理脚本 v${VOLSB_VER}
   install          全新安装
   relay            以线路机模式安装
   add              追加协议到现有配置
-  update           升级 sing-box 版本
+  update           升级 sing-box 核心版本
+  self-update      更新 VOLSB 脚本自身
   uninstall        完全卸载
   start            启动服务
   stop             停止服务
@@ -1329,7 +1417,8 @@ HDR
             [[ -f "$SB_CONFIG" ]] || die "请先安装"
             ask_connect_addr; select_protocols; assemble_and_write_config
             svc_restart && info "已更新并重启" ;;
-        update|upgrade)   do_update ;;
+        update|upgrade)   do_update_singbox ;;
+        self-update)      do_update_script ;;
         uninstall|remove) detect_os; do_uninstall ;;
         start)            require_root
                           [[ -f /etc/alpine-release ]] && INIT_SYS="openrc" || INIT_SYS="systemd"

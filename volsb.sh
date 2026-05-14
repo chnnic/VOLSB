@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.3.0
+#   版本   : 1.3.1
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.3.0"
+VOLSB_VER="1.3.1"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -358,9 +358,9 @@ ask_connect_addr() {
     echo -e "  ${C_BOLD}客户端连接地址${NC}（填入客户端的服务器地址）:"
     echo -e "  ① 自动检测本机公网IP: ${C_CYAN}${auto_ip:-检测失败}${NC}"
     echo    "  ② 手动输入（如有域名/DDNS 可在此填入）"
-    ask "选择 [1/2] 默认1: "; read -r opt
+    ask "选择 [1/2] 默认1:"; read -r opt
     if [[ "$opt" == "2" ]]; then
-        ask "输入 IP 或域名: "; read -r CONNECT_ADDR
+        ask "输入 IP 或域名:"; read -r CONNECT_ADDR
         [[ -z "$CONNECT_ADDR" ]] && CONNECT_ADDR="${auto_ip:-127.0.0.1}"
     else
         CONNECT_ADDR="${auto_ip:-127.0.0.1}"
@@ -381,9 +381,9 @@ ask_relay_connect_addr() {
     echo    "  客户端将连接此地址，线路机再转发到落地机"
     echo -e "  ① 自动检测本机公网IP: ${C_CYAN}${auto_ip:-检测失败}${NC}"
     echo    "  ② 手动输入（如有域名/DDNS）"
-    ask "选择 [1/2] 默认1: "; read -r opt
+    ask "选择 [1/2] 默认1:"; read -r opt
     if [[ "$opt" == "2" ]]; then
-        ask "输入线路机 IP 或域名: "; read -r CONNECT_ADDR
+        ask "输入线路机 IP 或域名:"; read -r CONNECT_ADDR
         [[ -z "$CONNECT_ADDR" ]] && CONNECT_ADDR="${auto_ip:-127.0.0.1}"
     else
         CONNECT_ADDR="${auto_ip:-127.0.0.1}"
@@ -395,7 +395,7 @@ ask_relay_connect_addr() {
 # 结果写入全局变量 USER_COUNT，避免子 shell 吞掉 read
 USER_COUNT=1
 ask_multi_user_count() {
-    ask "生成节点数量 (1-10, 回车默认1): "; read -r _cnt
+    ask "生成节点数量 (1-10, 回车默认1):"; read -r _cnt
     [[ "$_cnt" =~ ^[1-9][0-9]?$ ]] || _cnt=1
     [[ "$_cnt" -gt 10 ]] && _cnt=10
     USER_COUNT="$_cnt"
@@ -410,7 +410,7 @@ deploy_vless_reality() {
     if [[ -n "${VOLSB_PORT:-}" ]]; then
         port="$VOLSB_PORT"; info "端口 (环境变量): $port"
     else
-        ask "监听端口 (回车随机): "; read -r port
+        ask "监听端口 (回车随机):"; read -r port
         [[ -z "$port" ]] && port=$(random_port)
     fi
 
@@ -420,7 +420,7 @@ deploy_vless_reality() {
         echo ""
         echo "  SNI 用于伪装 TLS 握手,建议选目标国大型网站:"
         echo "  推荐: www.cloudflare.com / www.microsoft.com / www.apple.com / dl.google.com"
-        ask "输入 SNI [默认 www.cloudflare.com]: "; read -r sni
+        ask "输入 SNI [默认 www.cloudflare.com]:"; read -r sni
         [[ -z "$sni" ]] && sni="www.cloudflare.com"
     fi
 
@@ -485,15 +485,15 @@ INFO
 deploy_hysteria2() {
     step "配置 Hysteria2"
 
-    local port; ask "监听端口 (回车随机): "; read -r port
+    local port; ask "监听端口 (回车随机):"; read -r port
     [[ -z "$port" ]] && port=$(random_port)
 
     local masq_domain cert_path key_path insecure="true"
     echo "  TLS 证书:"
     echo "   1) 自签证书 (客户端需开 insecure)  2) Let's Encrypt 正式证书"
-    ask "选择 [1/2] 默认1: "; read -r cc; [[ -z "$cc" ]] && cc="1"
+    ask "选择 [1/2] 默认1:"; read -r cc; [[ -z "$cc" ]] && cc="1"
     if [[ "$cc" == "2" ]]; then
-        ask "域名: "; read -r masq_domain; [[ -z "$masq_domain" ]] && die "域名不能为空"
+        ask "域名:"; read -r masq_domain; [[ -z "$masq_domain" ]] && die "域名不能为空"
         acme_issue "$masq_domain"
         cert_path="${SB_CERT_DIR}/${masq_domain}.crt"
         key_path="${SB_CERT_DIR}/${masq_domain}.key"
@@ -545,8 +545,8 @@ INFO
 deploy_vmess_ws() {
     step "配置 VMess + WebSocket"
     local port ws_path
-    ask "监听端口 (回车随机, 建议80): "; read -r port; [[ -z "$port" ]] && port=$(random_port)
-    ask "WebSocket 路径 (回车随机): "; read -r ws_path
+    ask "监听端口 (回车随机, 建议80):"; read -r port; [[ -z "$port" ]] && port=$(random_port)
+    ask "WebSocket 路径 (回车随机):"; read -r ws_path
     [[ -z "$ws_path" ]] && ws_path="/$(gen_rand_hex 6)"
     [[ "${ws_path:0:1}" != "/" ]] && ws_path="/${ws_path}"
 
@@ -588,12 +588,12 @@ INFO
 # ────── 协议 4: Trojan + TLS ──────
 deploy_trojan() {
     step "配置 Trojan + TLS"
-    local port; ask "监听端口 (回车默认443): "; read -r port; [[ -z "$port" ]] && port=443
+    local port; ask "监听端口 (回车默认443):"; read -r port; [[ -z "$port" ]] && port=443
     local masq_domain cert_path key_path insecure="true"
     echo "  TLS 证书:  1) 自签  2) Let's Encrypt"
-    ask "选择 [1/2] 默认1: "; read -r cc; [[ -z "$cc" ]] && cc="1"
+    ask "选择 [1/2] 默认1:"; read -r cc; [[ -z "$cc" ]] && cc="1"
     if [[ "$cc" == "2" ]]; then
-        ask "域名: "; read -r masq_domain; [[ -z "$masq_domain" ]] && die "域名不能为空"
+        ask "域名:"; read -r masq_domain; [[ -z "$masq_domain" ]] && die "域名不能为空"
         acme_issue "$masq_domain"
         cert_path="${SB_CERT_DIR}/${masq_domain}.crt"
         key_path="${SB_CERT_DIR}/${masq_domain}.key"
@@ -644,10 +644,10 @@ INFO
 deploy_shadowtls() {
     step "配置 ShadowTLS v3 + Shadowsocks"
     local stls_port sni
-    ask "ShadowTLS 监听端口 (回车随机): "; read -r stls_port
+    ask "ShadowTLS 监听端口 (回车随机):"; read -r stls_port
     [[ -z "$stls_port" ]] && stls_port=$(random_port)
     echo "  推荐 SNI: www.bing.com / www.apple.com / gateway.icloud.com"
-    ask "伪装 SNI [默认 www.bing.com]: "; read -r sni; [[ -z "$sni" ]] && sni="www.bing.com"
+    ask "伪装 SNI [默认 www.bing.com]:"; read -r sni; [[ -z "$sni" ]] && sni="www.bing.com"
 
     local ss_port; ss_port=$(random_port)
     ask_multi_user_count; local user_count="$USER_COUNT"
@@ -770,14 +770,14 @@ INFOHEADER
     # 循环直到得到合法输入
     local ss_link=""
     while true; do
-        ask "选择 [1/2]，或直接粘贴 SS 链接: "; read -r ss_input_raw
+        ask "选择 [1/2]，或直接粘贴 SS 链接:"; read -r ss_input_raw
         [[ -z "$ss_input_raw" ]] && ss_input_raw="1"
 
         if [[ "$ss_input_raw" == ss://* ]]; then
             # 直接粘贴了 SS 链接
             ss_link="$ss_input_raw"; break
         elif [[ "$ss_input_raw" == "1" ]]; then
-            ask "粘贴 SS 链接: "; read -r ss_link
+            ask "粘贴 SS 链接:"; read -r ss_link
             [[ "$ss_link" == ss://* ]] && break
             err "请输入 ss:// 开头的链接"; ss_link=""
         elif [[ "$ss_input_raw" == "2" ]]; then
@@ -792,14 +792,14 @@ INFOHEADER
         _parse_ss_link "$ss_link" || return 1
     else
         # ── 手动输入 ──
-        ask "落地机 IP 或域名: "; read -r LAND_ADDR
+        ask "落地机 IP 或域名:"; read -r LAND_ADDR
         [[ -z "$LAND_ADDR" ]] && { err "落地机地址不能为空"; return 1; }
-        ask "落地机 SS 端口: "; read -r LAND_PORT
+        ask "落地机 SS 端口:"; read -r LAND_PORT
         [[ -z "$LAND_PORT" ]] && { err "落地机端口不能为空"; return 1; }
-        ask "落地机 SS 密码: "; read -r LAND_PASS
+        ask "落地机 SS 密码:"; read -r LAND_PASS
         [[ -z "$LAND_PASS" ]] && { err "落地机密码不能为空"; return 1; }
         echo "  加密方式:  1) 2022-blake3-aes-128-gcm (推荐)  2) aes-256-gcm  3) chacha20-ietf-poly1305"
-        ask "选择 [1-3] 默认1: "; read -r enc_choice
+        ask "选择 [1-3] 默认1:"; read -r enc_choice
         case "${enc_choice:-1}" in
             2) LAND_METHOD="aes-256-gcm" ;;
             3) LAND_METHOD="chacha20-ietf-poly1305" ;;
@@ -812,9 +812,9 @@ INFOHEADER
     ask_relay_connect_addr  # 获取线路机自身公网IP
 
     local in_port sni
-    ask "入站端口 (回车随机): "; read -r in_port; [[ -z "$in_port" ]] && in_port=$(random_port)
+    ask "入站端口 (回车随机):"; read -r in_port; [[ -z "$in_port" ]] && in_port=$(random_port)
     echo "  SNI 推荐: www.cloudflare.com / www.microsoft.com"
-    ask "伪装 SNI [默认 www.cloudflare.com]: "; read -r sni; [[ -z "$sni" ]] && sni="www.cloudflare.com"
+    ask "伪装 SNI [默认 www.cloudflare.com]:"; read -r sni; [[ -z "$sni" ]] && sni="www.cloudflare.com"
 
     local keypair; keypair=$("$SB_BIN" generate reality-keypair)
     local priv_key; priv_key=$(echo "$keypair" | awk '/PrivateKey/{print $2}')
@@ -955,7 +955,7 @@ BANNER
     # 支持环境变量 VOLSB_PROTO 跳过交互
     local raw_input="${VOLSB_PROTO:-}"
     if [[ -z "$raw_input" ]]; then
-        ask "请选择协议 [0-5]: "; read -r raw_input
+        ask "请选择协议 [0-5]:"; read -r raw_input
     else
         info "协议选择 (环境变量): $raw_input"
     fi
@@ -1067,7 +1067,7 @@ append_and_write_config() {
         echo "  选项:"
         echo "   1) 保留旧节点，追加新节点（推荐）"
         echo "   2) 清除旧节点，只保留新节点"
-        ask "选择 [1/2] 默认1: "; read -r keep_choice
+        ask "选择 [1/2] 默认1:"; read -r keep_choice
         [[ "${keep_choice:-1}" == "2" ]] && keep_old=false
     fi
 
@@ -1670,7 +1670,7 @@ HDR
 
 
 reset_traffic_log() {
-    ask "确认清空流量日志? [y/N]: "; read -r ans
+    ask "确认清空流量日志? [y/N]:"; read -r ans
     [[ "$ans" =~ ^[Yy]$ ]] || { info "已取消"; return; }
     : > "$SB_LOG" 2>/dev/null && info "日志已清空"
     echo "{}" > "$SB_TRAFFIC"
@@ -1783,7 +1783,7 @@ reset_ports() {
     echo "   1) 仅重置端口"
     echo "   2) 仅重置密码/UUID"
     echo "   3) 同时重置端口和密码/UUID"
-    ask "选择 [1-3] 默认3: "; read -r reset_opt
+    ask "选择 [1-3] 默认3:"; read -r reset_opt
     [[ -z "$reset_opt" ]] && reset_opt="3"
 
     local backup; backup=$(mktemp)
@@ -1866,7 +1866,7 @@ LOGO
     if [[ -n "${VOLSB_MODE:-}" ]]; then
         DEPLOY_MODE="$VOLSB_MODE"; return
     fi
-    ask "选择模式 [1/2] 默认1: "; read -r _mode
+    ask "选择模式 [1/2] 默认1:"; read -r _mode
     [[ -z "$_mode" ]] && _mode="1"
     DEPLOY_MODE="$_mode"
 }
@@ -1951,7 +1951,7 @@ assemble_relay_check() {
 
 do_uninstall() {
     require_root
-    ask "确认完全卸载 VOLSB / sing-box? [y/N]: "; read -r ans
+    ask "确认完全卸载 VOLSB / sing-box? [y/N]:"; read -r ans
     [[ "$ans" =~ ^[Yy]$ ]] || { info "已取消"; return; }
     svc_stop 2>/dev/null || true
     if [[ "$INIT_SYS" == "openrc" ]]; then
@@ -2011,7 +2011,7 @@ do_update_script() {
     fi
 
     info "发现新版本: v${VOLSB_VER} → v${remote_ver}"
-    ask "确认更新? [Y/n]: "; read -r _ans
+    ask "确认更新? [Y/n]:"; read -r _ans
     [[ "$_ans" =~ ^[Nn]$ ]] && { info "已取消"; return 0; }
 
     # 确定脚本真实路径:
@@ -2074,7 +2074,7 @@ do_update_menu() {
     printf "  ${C_BOLD}%-5s${NC} %s\n" "3)" "全部更新"
     printf "  ${C_BOLD}%-5s${NC} %s\n" "0)" "取消"
     hr
-    ask "选择 [0-3]: "; read -r uc
+    ask "选择 [0-3]:"; read -r uc
     case "$uc" in
         1) do_update_script ;;
         2) do_update_singbox ;;
@@ -2146,7 +2146,7 @@ LOGO
         hr
         echo "   0) 退出"
         echo ""
-        ask "请选择 [0-14]: "; read -r opt
+        ask "请选择 [0-14]:"; read -r opt
 
         case "$opt" in
             1)  do_install || true ;;

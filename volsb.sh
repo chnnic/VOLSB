@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.0.1
+#   版本   : 1.0.2
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS
@@ -27,8 +27,15 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.0.1"
+VOLSB_VER="1.0.2"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
+
+# ── 环境变量支持 (方便 CI / 自动化部署) ──
+# VOLSB_IP        : 指定连接地址,跳过 IP 检测提示
+# VOLSB_PORT      : 指定入站端口,跳过端口交互
+# VOLSB_SNI       : 指定 Reality SNI,跳过 SNI 交互
+# VOLSB_MODE      : 1=部署机 2=线路机,跳过模式选择
+# VOLSB_PROTO     : 协议序号,如 "1" "1 2" "0"(全部),跳过协议选择
 SB_BIN="/usr/local/bin/sing-box"
 SB_CONF_DIR="/etc/sing-box"
 SB_CONFIG="${SB_CONF_DIR}/config.json"
@@ -60,28 +67,48 @@ detect_os() {
     elif [[ -f /etc/os-release ]]; then
         # shellcheck disable=SC1091
         source /etc/os-release
-        OS_ID="${ID:-unknown}"; OS_VER="${VERSION_ID:-0}"
+        OS_ID="${ID:-unknown}"
+        OS_ID_LIKE="${ID_LIKE:-}"   # 衍生发行版兜底 (PopOS, Mint, Kali 等)
+        OS_VER="${VERSION_ID:-0}"
         OS_NAME="${PRETTY_NAME:-$OS_ID}"
-        case "$OS_ID" in
-            debian|ubuntu|linuxmint|pop)
+
+        # 用 ID 和 ID_LIKE 共同判断发行版系列
+        local os_family="" id_all="${OS_ID} ${OS_ID_LIKE}"
+        if echo "$id_all" | grep -qiE "debian|ubuntu|mint|pop|kali|elementary|zorin"; then
+            os_family="debian"
+        elif echo "$id_all" | grep -qiE "centos|rhel|almalinux|rocky|oracle"; then
+            os_family="redhat"
+        elif echo "$id_all" | grep -qi "fedora"; then
+            os_family="fedora"
+        elif echo "$id_all" | grep -qiE "opensuse|sles"; then
+            os_family="suse"
+        elif echo "$id_all" | grep -qiE "arch|manjaro|endeavour"; then
+            os_family="arch"
+        else
+            os_family="unknown"
+        fi
+
+        case "$os_family" in
+            debian)
+                export DEBIAN_FRONTEND=noninteractive   # 防止 apt 交互提示卡住
                 PKG_UPDATE="apt-get update -y -qq"
                 PKG_INSTALL="apt-get install -y -qq"
                 PKGS="curl wget tar jq openssl ca-certificates qrencode" ;;
-            centos|rhel|almalinux|rocky)
+            redhat)
                 local pm="yum"; command -v dnf &>/dev/null && pm="dnf"
                 PKG_UPDATE="$pm makecache -q"; PKG_INSTALL="$pm install -y -q"
                 PKGS="curl wget tar jq openssl ca-certificates qrencode" ;;
             fedora)
                 PKG_UPDATE="dnf makecache -q"; PKG_INSTALL="dnf install -y -q"
                 PKGS="curl wget tar jq openssl ca-certificates qrencode" ;;
-            opensuse*|sles)
+            suse)
                 PKG_UPDATE="zypper refresh -q"; PKG_INSTALL="zypper install -y -q"
                 PKGS="curl wget tar jq openssl ca-certificates qrencode" ;;
-            arch|manjaro|endeavouros)
+            arch)
                 PKG_UPDATE="pacman -Sy --noconfirm"
                 PKG_INSTALL="pacman -S --noconfirm --needed"
                 PKGS="curl wget tar jq openssl ca-certificates qrencode" ;;
-            *) die "不支持的发行版: $OS_ID" ;;
+            *) die "不支持的发行版: $OS_ID (ID_LIKE: ${OS_ID_LIKE:-无})" ;;
         esac
         INIT_SYS="systemd"
     else
@@ -215,12 +242,16 @@ svc_active()  {
 # ──────────────────────── 工具函数 ────────────────────────
 get_public_ip() {
     local ip=""
-    for api in "https://api.ipify.org" "https://ifconfig.me/ip" "https://ipinfo.io/ip"; do
+    # 依次尝试多个 API，优先 IPv4
+    for api in         "https://api.ipify.org"         "https://ipinfo.io/ip"         "https://ifconfig.me/ip"         "https://icanhazip.com"         "https://ipecho.net/plain"; do
         ip=$(curl -fsSL --max-time 5 "$api" 2>/dev/null | tr -d '[:space:]')
-        [[ -n "$ip" ]] && break
+        # 校验是否为合法 IPv4 格式
+        if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "$ip"; return 0
+        fi
     done
-    [[ -z "$ip" ]] && \
-        ip=$(curl -fsSL --max-time 5 "https://api6.ipify.org" 2>/dev/null | tr -d '[:space:]')
+    # IPv6 fallback
+    ip=$(curl -fsSL --max-time 5 "https://api6.ipify.org" 2>/dev/null | tr -d '[:space:]')
     echo "${ip:-}"
 }
 
@@ -314,6 +345,13 @@ declare -a ALL_LINKS=()
 
 # ────── 公共参数收集:连接IP/域名 ──────
 ask_connect_addr() {
+    # 支持环境变量 VOLSB_IP 跳过交互
+    if [[ -n "${VOLSB_IP:-}" ]]; then
+        CONNECT_ADDR="$VOLSB_IP"
+        info "连接地址 (环境变量): $CONNECT_ADDR"
+        return
+    fi
+
     local auto_ip; auto_ip=$(get_public_ip)
     echo ""
     echo "  节点链接中使用的连接地址:"
@@ -342,14 +380,23 @@ deploy_vless_reality() {
     step "配置 VLESS + XTLS-Reality"
 
     local port sni
-    ask "监听端口 (回车随机): "; read -r port
-    [[ -z "$port" ]] && port=$(random_port)
+    # 支持环境变量 VOLSB_PORT / VOLSB_SNI
+    if [[ -n "${VOLSB_PORT:-}" ]]; then
+        port="$VOLSB_PORT"; info "端口 (环境变量): $port"
+    else
+        ask "监听端口 (回车随机): "; read -r port
+        [[ -z "$port" ]] && port=$(random_port)
+    fi
 
-    echo ""
-    echo "  SNI 用于伪装 TLS 握手,建议选目标国大型网站:"
-    echo "  推荐: www.cloudflare.com / www.microsoft.com / www.apple.com / dl.google.com"
-    ask "输入 SNI [默认 www.cloudflare.com]: "; read -r sni
-    [[ -z "$sni" ]] && sni="www.cloudflare.com"
+    if [[ -n "${VOLSB_SNI:-}" ]]; then
+        sni="$VOLSB_SNI"; info "SNI (环境变量): $sni"
+    else
+        echo ""
+        echo "  SNI 用于伪装 TLS 握手,建议选目标国大型网站:"
+        echo "  推荐: www.cloudflare.com / www.microsoft.com / www.apple.com / dl.google.com"
+        ask "输入 SNI [默认 www.cloudflare.com]: "; read -r sni
+        [[ -z "$sni" ]] && sni="www.cloudflare.com"
+    fi
 
     # 生成 Reality 密钥对(全局复用)
     local keypair; keypair=$("$SB_BIN" generate reality-keypair)
@@ -801,7 +848,13 @@ BANNER
     echo ""
     echo "  支持多选: ${C_CYAN}1 2${NC}  ${C_CYAN}1 2 4${NC}  ${C_CYAN}0${NC}(全部)"
     echo ""
-    ask "请选择协议 [0-5]: "; read -r raw_input
+    # 支持环境变量 VOLSB_PROTO 跳过交互
+    local raw_input="${VOLSB_PROTO:-}"
+    if [[ -z "$raw_input" ]]; then
+        ask "请选择协议 [0-5]: "; read -r raw_input
+    else
+        info "协议选择 (环境变量): $raw_input"
+    fi
     [[ -z "$raw_input" ]] && raw_input="1"
     [[ "$raw_input" == "0" ]] && raw_input="1 2 3 4 5"
 
@@ -1001,44 +1054,68 @@ HDR
 }
 
 # ════════════════════════════════════════════════════════════
-#  端口重置
+#  端口 & 密码重置
 # ════════════════════════════════════════════════════════════
 
 reset_ports() {
     require_root
     [[ -f "$SB_CONFIG" ]] || { warn "未找到配置文件"; return; }
-    step "重置所有入站端口"
 
-    local tmp; tmp=$(mktemp)
-    # 用 jq 为每个入站生成新随机端口
-    local new_config
-    new_config=$(jq '
-      .inbounds |= map(
-        if .listen_port then
-          .listen_port = (. | to_entries | map(.value) | length * 1000 + (now | floor % 40000) + 10000)
-        else . end
-      )
-    ' "$SB_CONFIG") 2>/dev/null
+    echo ""
+    echo -e "  ${C_BOLD}重置选项:${NC}"
+    echo "   1) 仅重置端口"
+    echo "   2) 仅重置密码/UUID"
+    echo "   3) 同时重置端口和密码/UUID"
+    ask "选择 [1-3] 默认3: "; read -r reset_opt
+    [[ -z "$reset_opt" ]] && reset_opt="3"
 
-    # jq 无法用 random,改用 bash 直接替换端口
-    local new_json="$SB_CONFIG"
-    local ports_old; ports_old=$(jq -r '.inbounds[].listen_port // empty' "$SB_CONFIG")
+    local backup; backup=$(mktemp)
+    cp "$SB_CONFIG" "$backup"   # 备份原配置,失败时回滚
+
     local updated; updated=$(cat "$SB_CONFIG")
-    for old_p in $ports_old; do
-        local new_p; new_p=$(random_port)
-        updated=$(echo "$updated" | sed "s/\"listen_port\": ${old_p}/\"listen_port\": ${new_p}/g")
-        info "端口 $old_p → $new_p"
-        open_port "$new_p" tcp; open_port "$new_p" udp
-    done
+
+    # ── 重置端口 ──
+    if [[ "$reset_opt" == "1" || "$reset_opt" == "3" ]]; then
+        step "重置入站端口"
+        local ports_old; ports_old=$(jq -r '.inbounds[].listen_port // empty' "$SB_CONFIG")
+        for old_p in $ports_old; do
+            local new_p; new_p=$(random_port)
+            updated=$(echo "$updated" | sed "s/\"listen_port\": ${old_p}/\"listen_port\": ${new_p}/g")
+            info "端口 $old_p → $new_p"
+            open_port "$new_p" tcp; open_port "$new_p" udp
+        done
+    fi
+
+    # ── 重置密码/UUID ──
+    if [[ "$reset_opt" == "2" || "$reset_opt" == "3" ]]; then
+        step "重置密码 / UUID"
+        # 替换所有 password 字段
+        local pwd_list; pwd_list=$(echo "$updated" | jq -r '.. | objects | .password? // empty' 2>/dev/null | sort -u)
+        for old_pwd in $pwd_list; do
+            local new_pwd; new_pwd=$(gen_rand_str 24)
+            updated=$(echo "$updated" | sed "s|\"password\": \"${old_pwd}\"|\"password\": \"${new_pwd}\"|g")
+            info "密码已更新 (${old_pwd:0:6}… → ${new_pwd:0:6}…)"
+        done
+        # 替换所有 uuid 字段
+        local uuid_list; uuid_list=$(echo "$updated" | jq -r '.. | objects | .uuid? // empty' 2>/dev/null | sort -u)
+        for old_uuid in $uuid_list; do
+            local new_uuid; new_uuid=$(gen_uuid)
+            updated=$(echo "$updated" | sed "s/${old_uuid}/${new_uuid}/g")
+            info "UUID 已更新 (${old_uuid:0:8}… → ${new_uuid:0:8}…)"
+        done
+    fi
+
     echo "$updated" > "$SB_CONFIG"
 
     if "$SB_BIN" check -c "$SB_CONFIG" &>/dev/null; then
-        svc_restart && info "端口已重置,服务已重启"
+        svc_restart && info "重置完成,服务已重启"
+        # 刷新节点信息文件提示
+        warn "节点信息已变更,请执行菜单 9 重新查看最新链接"
     else
-        err "配置校验失败,已回滚"
-        cp "$tmp" "$SB_CONFIG" 2>/dev/null || true
+        err "配置校验失败,回滚至备份"
+        cp "$backup" "$SB_CONFIG"
     fi
-    rm -f "$tmp"
+    rm -f "$backup"
 }
 
 # ════════════════════════════════════════════════════════════
@@ -1066,6 +1143,10 @@ LOGO
     printf "  ${C_BOLD}%-5s${NC} ${C_YELLOW}%-20s${NC} %s\n" "2)" "线路机 (中转机)" "接收客户端流量后转发至落地机"
     echo ""
     hr
+    # 支持环境变量 VOLSB_MODE 跳过交互
+    if [[ -n "${VOLSB_MODE:-}" ]]; then
+        echo "$VOLSB_MODE"; return
+    fi
     ask "选择模式 [1/2] 默认1: "; read -r mode
     [[ -z "$mode" ]] && mode="1"
     echo "$mode"
@@ -1117,10 +1198,14 @@ HDR
 
     step "启动 sing-box 服务"
     svc_start
-    sleep 2
+    # 等待进程就绪后二次确认状态
+    local retry=0
+    while ! svc_active 2>/dev/null && [[ $retry -lt 5 ]]; do
+        sleep 1; (( retry++ )) || true
+    done
 
     if svc_active; then
-        info "sing-box 运行中 ✔"
+        info "sing-box 运行中 ✔  (用时 ${retry}s)"
     else
         err "启动失败! 查看日志:"
         [[ -f "$SB_LOG" ]] && tail -20 "$SB_LOG" || true
@@ -1306,7 +1391,7 @@ LOGO
         echo ""
         echo -e "  ${C_BOLD}📋 节点与配置${NC}"
         echo "   9) 查看节点信息 & 分享链接"
-        echo "  10) 重置所有端口"
+        echo "  10) 重置端口 / 密码 / UUID"
         echo "  11) 编辑配置文件"
         echo ""
         echo -e "  ${C_BOLD}📊 流量管理${NC}"

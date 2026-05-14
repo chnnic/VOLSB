@@ -1,132 +1,165 @@
 #!/usr/bin/env bash
 # =============================================================================
-#   sing-box 服务端一键部署管理脚本
-#   支持协议: VLESS-Reality / Hysteria2 / VMess-WS / Trojan-TLS / ShadowTLS v3
-#   支持系统: Debian / Ubuntu / CentOS / RHEL / Alma / Rocky /
-#             Fedora / openSUSE / Arch Linux
-#   Version : 2.0.0
+#   VOLSB — sing-box 服务端一键部署与管理脚本
+#   版本   : 3.0.0
+#   模式   : 部署机(落地机) / 线路机(中转机)
+#   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS
+#   系统   : Alpine(OpenRC) / Debian / Ubuntu / CentOS / RHEL /
+#             Alma / Rocky / Fedora / openSUSE / Arch
+#   快捷键 : 安装后输入 volsb 进入管理界面
 # =============================================================================
 
 set -euo pipefail
 
-# ======================== 颜色 / 输出工具 ========================
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+# ──────────────────────── 颜色 & 输出 ────────────────────────
+C_RED='\033[0;31m'; C_GREEN='\033[0;32m'; C_YELLOW='\033[1;33m'
+C_BLUE='\033[0;34m'; C_CYAN='\033[0;36m'; C_MAGENTA='\033[0;35m'
+C_BOLD='\033[1m'; C_DIM='\033[2m'; NC='\033[0m'
 
-info()  { echo -e "${GREEN}[✓]${NC} $*"; }
-warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
-err()   { echo -e "${RED}[✗]${NC} $*" >&2; }
-step()  { echo -e "\n${BLUE}${BOLD}──── $* ────${NC}"; }
-ask()   { echo -en "${CYAN}[?]${NC} $*"; }
-die()   { err "$*"; exit 1; }
-hr()    { echo -e "${BLUE}$(printf '─%.0s' {1..50})${NC}"; }
+info()    { echo -e "${C_GREEN}[✓]${NC} $*"; }
+warn()    { echo -e "${C_YELLOW}[!]${NC} $*"; }
+err()     { echo -e "${C_RED}[✗]${NC} $*" >&2; }
+step()    { echo -e "\n${C_CYAN}${C_BOLD}▶ $*${NC}"; }
+ask()     { printf "${C_YELLOW}[?]${NC} %s" "$*"; }
+die()     { err "$*"; exit 1; }
+hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
+banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
-# ======================== 全局路径 ========================
+# ──────────────────────── 全局路径 ────────────────────────
+VOLSB_VER="3.0.0"
 SB_BIN="/usr/local/bin/sing-box"
 SB_CONF_DIR="/etc/sing-box"
 SB_CONFIG="${SB_CONF_DIR}/config.json"
 SB_CERT_DIR="${SB_CONF_DIR}/certs"
-SB_INFO_FILE="${SB_CONF_DIR}/nodes.info"
+SB_DATA_DIR="/var/lib/sing-box"
 SB_LOG_DIR="/var/log/sing-box"
 SB_LOG="${SB_LOG_DIR}/sing-box.log"
-SB_DATA_DIR="/var/lib/sing-box"
-SB_SERVICE="/etc/systemd/system/sing-box.service"
+SB_INFO="${SB_CONF_DIR}/nodes.info"          # 节点明文信息
+SB_LINKS="${SB_CONF_DIR}/links.txt"          # 所有分享链接
+SB_TRAFFIC="${SB_CONF_DIR}/traffic.json"     # 流量统计缓存
+SB_ENV="${SB_CONF_DIR}/volsb.env"            # 持久化运行参数
+VOLSB_CMD="/usr/local/bin/volsb"             # 快捷命令路径
+# Systemd / OpenRC service
+SB_SYSTEMD="/etc/systemd/system/sing-box.service"
+SB_OPENRC="/etc/init.d/sing-box"
 
-# ======================== 系统检测 ========================
+# ──────────────────────── 系统检测 ────────────────────────
 require_root() {
-    [[ $EUID -eq 0 ]] || die "请用 root 用户执行 (sudo -i 后再运行)"
+    [[ $EUID -eq 0 ]] || die "请用 root 用户执行  (提示: sudo -i)"
 }
 
 detect_os() {
-    [[ -f /etc/os-release ]] || die "无法识别操作系统"
-    source /etc/os-release
-    OS_ID="${ID:-unknown}"
-    OS_VER="${VERSION_ID:-0}" # from os-release
-    OS_NAME="${PRETTY_NAME:-$OS_ID}"
-
-    case "$OS_ID" in
-        debian|ubuntu|linuxmint|pop)
-            PKG_UPDATE="apt-get update -y -qq"
-            PKG_INSTALL="apt-get install -y -qq"
-            PKGS="curl wget tar jq openssl ca-certificates qrencode"
-            ;;
-        centos|rhel|almalinux|rocky)
-            if command -v dnf &>/dev/null; then
+    if [[ -f /etc/alpine-release ]]; then
+        OS_ID="alpine"; OS_VER=$(cat /etc/alpine-release)
+        OS_NAME="Alpine Linux $OS_VER"
+        PKG_UPDATE="apk update -q"; PKG_INSTALL="apk add -q"
+        PKGS="curl wget tar jq openssl ca-certificates qrencode coreutils"
+        INIT_SYS="openrc"
+    elif [[ -f /etc/os-release ]]; then
+        # shellcheck disable=SC1091
+        source /etc/os-release
+        OS_ID="${ID:-unknown}"; OS_VER="${VERSION_ID:-0}"
+        OS_NAME="${PRETTY_NAME:-$OS_ID}"
+        case "$OS_ID" in
+            debian|ubuntu|linuxmint|pop)
+                PKG_UPDATE="apt-get update -y -qq"
+                PKG_INSTALL="apt-get install -y -qq"
+                PKGS="curl wget tar jq openssl ca-certificates qrencode" ;;
+            centos|rhel|almalinux|rocky)
+                local pm="yum"; command -v dnf &>/dev/null && pm="dnf"
+                PKG_UPDATE="$pm makecache -q"; PKG_INSTALL="$pm install -y -q"
+                PKGS="curl wget tar jq openssl ca-certificates qrencode" ;;
+            fedora)
                 PKG_UPDATE="dnf makecache -q"; PKG_INSTALL="dnf install -y -q"
-            else
-                PKG_UPDATE="yum makecache -q"; PKG_INSTALL="yum install -y -q"
-            fi
-            PKGS="curl wget tar jq openssl ca-certificates qrencode"
-            ;;
-        fedora)
-            PKG_UPDATE="dnf makecache -q"; PKG_INSTALL="dnf install -y -q"
-            PKGS="curl wget tar jq openssl ca-certificates qrencode"
-            ;;
-        opensuse*|sles)
-            PKG_UPDATE="zypper refresh -q"; PKG_INSTALL="zypper install -y -q"
-            PKGS="curl wget tar jq libopenssl1_1 ca-certificates qrencode"
-            ;;
-        arch|manjaro|endeavouros)
-            PKG_UPDATE="pacman -Sy --noconfirm"; PKG_INSTALL="pacman -S --noconfirm --needed"
-            PKGS="curl wget tar jq openssl ca-certificates qrencode"
-            ;;
-        *)
-            die "不支持的发行版: $OS_ID"
-            ;;
-    esac
-    info "检测到系统: $OS_NAME"
+                PKGS="curl wget tar jq openssl ca-certificates qrencode" ;;
+            opensuse*|sles)
+                PKG_UPDATE="zypper refresh -q"; PKG_INSTALL="zypper install -y -q"
+                PKGS="curl wget tar jq openssl ca-certificates qrencode" ;;
+            arch|manjaro|endeavouros)
+                PKG_UPDATE="pacman -Sy --noconfirm"
+                PKG_INSTALL="pacman -S --noconfirm --needed"
+                PKGS="curl wget tar jq openssl ca-certificates qrencode" ;;
+            *) die "不支持的发行版: $OS_ID" ;;
+        esac
+        INIT_SYS="systemd"
+    else
+        die "无法识别操作系统"
+    fi
+    info "系统: $OS_NAME  |  初始化: $INIT_SYS"
 }
 
 detect_arch() {
     case "$(uname -m)" in
         x86_64|amd64)  ARCH="amd64" ;;
         aarch64|arm64) ARCH="arm64" ;;
-        armv7l|armv7)  ARCH="armv7" ;;
+        armv7l)        ARCH="armv7" ;;
         s390x)         ARCH="s390x" ;;
         *) die "不支持的 CPU 架构: $(uname -m)" ;;
     esac
-    info "CPU 架构: $ARCH"
 }
 
 install_deps() {
     step "安装依赖"
-    eval "$PKG_UPDATE" 2>/dev/null | tail -1 || warn "包列表更新失败,继续..."
+    eval "$PKG_UPDATE" 2>/dev/null || warn "包列表更新失败,继续..."
+    # shellcheck disable=SC2086
     eval "$PKG_INSTALL $PKGS" 2>/dev/null || warn "部分依赖安装失败,继续..."
 }
 
-# ======================== sing-box 安装 ========================
+# ──────────────────────── sing-box 下载安装 ────────────────────────
 get_latest_version() {
-    local ver
-    ver=$(curl -fsSL --max-time 10 \
+    local v
+    v=$(curl -fsSL --max-time 10 \
         "https://api.github.com/repos/SagerNet/sing-box/releases/latest" \
         | jq -r '.tag_name // empty' 2>/dev/null | sed 's/^v//')
-    [[ -n "$ver" ]] || die "获取最新版本失败,请检查网络"
-    echo "$ver"
+    [[ -n "$v" ]] || die "获取最新版本失败,请检查网络或 GitHub 访问"
+    echo "$v"
 }
 
-install_singbox_binary() {
+install_binary() {
     local ver="$1"
     local tmpdir; tmpdir=$(mktemp -d)
     local pkg="sing-box-${ver}-linux-${ARCH}.tar.gz"
     local url="https://github.com/SagerNet/sing-box/releases/download/v${ver}/${pkg}"
-
-    info "下载 sing-box v${ver} ..."
-    if ! curl -fsSL --max-time 120 -o "${tmpdir}/${pkg}" "$url"; then
-        rm -rf "$tmpdir"; die "下载失败: $url"
-    fi
+    info "下载 sing-box v${ver} (${ARCH})..."
+    curl -fsSL --max-time 180 -o "${tmpdir}/${pkg}" "$url" \
+        || { rm -rf "$tmpdir"; die "下载失败: $url"; }
     tar -xzf "${tmpdir}/${pkg}" -C "$tmpdir" 2>/dev/null || die "解压失败"
     install -m 755 "${tmpdir}/sing-box-${ver}-linux-${ARCH}/sing-box" "$SB_BIN"
     rm -rf "$tmpdir"
-    info "安装完成: $("$SB_BIN" version | head -1)"
+    info "sing-box 已安装: $("$SB_BIN" version | head -1)"
 }
 
-setup_directories() {
+setup_dirs() {
     mkdir -p "$SB_CONF_DIR" "$SB_CERT_DIR" "$SB_LOG_DIR" "$SB_DATA_DIR"
     chmod 700 "$SB_CERT_DIR"
 }
 
+# ──────────────────────── 服务管理 (systemd / OpenRC) ────────────────────────
 install_service() {
-    cat > "$SB_SERVICE" <<'UNIT'
+    if [[ "$INIT_SYS" == "openrc" ]]; then
+        cat > "$SB_OPENRC" <<'RC'
+#!/sbin/openrc-run
+name="sing-box"
+description="sing-box proxy server"
+command="/usr/local/bin/sing-box"
+command_args="-D /var/lib/sing-box -C /etc/sing-box run"
+command_background=true
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/var/log/sing-box/sing-box.log"
+error_log="/var/log/sing-box/sing-box.log"
+
+depend() { need net; after firewall; }
+
+start_pre() {
+    /usr/local/bin/sing-box check -C /etc/sing-box || return 1
+    mkdir -p /var/lib/sing-box /var/log/sing-box
+}
+RC
+        chmod +x "$SB_OPENRC"
+        rc-update add sing-box default &>/dev/null
+        info "OpenRC 服务已注册 (开机自启)"
+    else
+        cat > "$SB_SYSTEMD" <<'UNIT'
 [Unit]
 Description=sing-box proxy server
 Documentation=https://sing-box.sagernet.org
@@ -147,31 +180,58 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 UNIT
-    systemctl daemon-reload
-    systemctl enable sing-box &>/dev/null
-    info "systemd 服务已注册"
+        systemctl daemon-reload
+        systemctl enable sing-box &>/dev/null
+        info "Systemd 服务已注册 (开机自启)"
+    fi
 }
 
-# ======================== 工具函数 ========================
+svc_start()   {
+    if [[ "$INIT_SYS" == "openrc" ]]; then rc-service sing-box start
+    else systemctl start sing-box; fi
+}
+svc_stop()    {
+    if [[ "$INIT_SYS" == "openrc" ]]; then rc-service sing-box stop
+    else systemctl stop sing-box; fi
+}
+svc_restart() {
+    if [[ "$INIT_SYS" == "openrc" ]]; then rc-service sing-box restart
+    else systemctl restart sing-box; fi
+}
+svc_status()  {
+    if [[ "$INIT_SYS" == "openrc" ]]; then rc-service sing-box status
+    else systemctl status sing-box --no-pager -l | head -30; fi
+}
+svc_active()  {
+    if [[ "$INIT_SYS" == "openrc" ]]; then
+        rc-service sing-box status 2>/dev/null | grep -q "started"
+    else
+        systemctl is-active --quiet sing-box 2>/dev/null
+    fi
+}
+
+# ──────────────────────── 工具函数 ────────────────────────
 get_public_ip() {
     local ip=""
     for api in "https://api.ipify.org" "https://ifconfig.me/ip" "https://ipinfo.io/ip"; do
-        ip=$(curl -fsSL --max-time 5 "$api" 2>/dev/null | tr -d '[:space:]') && [[ -n "$ip" ]] && break
+        ip=$(curl -fsSL --max-time 5 "$api" 2>/dev/null | tr -d '[:space:]')
+        [[ -n "$ip" ]] && break
     done
-    [[ -z "$ip" ]] && ip=$(curl -fsSL --max-time 5 "https://api6.ipify.org" 2>/dev/null | tr -d '[:space:]')
-    echo "${ip:-<YOUR_SERVER_IP>}"
+    [[ -z "$ip" ]] && \
+        ip=$(curl -fsSL --max-time 5 "https://api6.ipify.org" 2>/dev/null | tr -d '[:space:]')
+    echo "${ip:-}"
 }
 
 random_port() {
-    local port
+    local p
     while :; do
-        port=$(( RANDOM % 45000 + 10000 ))
-        ss -tuln 2>/dev/null | grep -q ":${port} " || { echo "$port"; return; }
+        p=$(( RANDOM % 45000 + 10000 ))
+        ss -tuln 2>/dev/null | grep -q ":${p} " || { echo "$p"; return; }
     done
 }
 
 gen_uuid()     { "$SB_BIN" generate uuid; }
-gen_rand_str() { openssl rand -base64 32 | tr -d '+/=' | head -c "${1:-24}"; }
+gen_rand_str() { openssl rand -base64 48 | tr -d '+/=\n' | head -c "${1:-32}"; }
 gen_rand_hex() { openssl rand -hex "${1:-8}"; }
 
 gen_self_cert() {
@@ -187,423 +247,593 @@ gen_self_cert() {
     echo "${crt}:${key}"
 }
 
-open_ports() {
+open_port() {
     local port="$1" proto="${2:-tcp}"
-    if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "active"; then
+    command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "active" && \
         ufw allow "${port}/${proto}" &>/dev/null || true
-    fi
-    if command -v firewall-cmd &>/dev/null && systemctl is-active --quiet firewalld; then
-        firewall-cmd --permanent --add-port="${port}/${proto}" &>/dev/null || true
-        firewall-cmd --reload &>/dev/null || true
-    fi
+    command -v firewall-cmd &>/dev/null && \
+        systemctl is-active --quiet firewalld 2>/dev/null && {
+            firewall-cmd --permanent --add-port="${port}/${proto}" &>/dev/null || true
+            firewall-cmd --reload &>/dev/null || true
+        }
+    # iptables fallback
+    command -v iptables &>/dev/null && {
+        iptables  -I INPUT -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null || true
+        ip6tables -I INPUT -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null || true
+    }
 }
 
 print_qr() {
-    command -v qrencode &>/dev/null && echo "$1" | qrencode -t ANSIUTF8 2>/dev/null || true
+    command -v qrencode &>/dev/null || return
+    echo -e "\n${C_DIM}  扫码导入:${NC}"
+    echo "$1" | qrencode -t ANSIUTF8 2>/dev/null || true
 }
 
-# ======================== 协议配置函数 ========================
-# 每个函数读取用户输入,将 JSON 片段写入 INBOUND_FRAGMENT 变量
-# ShadowTLS 写入两个片段,以 ::SPLIT:: 分隔
+save_env() { declare -p "$1" >> "$SB_ENV" 2>/dev/null || true; }
 
-configure_vless_reality() {
-    step "VLESS + XTLS-Reality 参数配置"
-    local port uuid sni
+load_env() {
+    # shellcheck disable=SC1090
+    [[ -f "$SB_ENV" ]] && source "$SB_ENV" 2>/dev/null || true
+}
 
+# ──────────────────────── acme.sh Let's Encrypt ────────────────────────
+acme_issue() {
+    local domain="$1"
+    local crt="${SB_CERT_DIR}/${domain}.crt"
+    local key="${SB_CERT_DIR}/${domain}.key"
+    [[ -f "$crt" && -f "$key" ]] && { info "证书已存在,跳过申请"; return; }
+    info "申请 Let's Encrypt 证书 (域名: $domain)..."
+    svc_stop 2>/dev/null || true
+    [[ -f ~/.acme.sh/acme.sh ]] || \
+        curl -fsSL https://get.acme.sh | sh -s "email=acme@${domain}" >/dev/null 2>&1 \
+        || die "acme.sh 安装失败"
+    ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt >/dev/null 2>&1
+    ~/.acme.sh/acme.sh --issue -d "$domain" --standalone -k ec-256 --httpport 80 \
+        || die "证书申请失败 — 请确认: ① 域名已解析到本机 ② 80端口未被占用"
+    ~/.acme.sh/acme.sh --install-cert -d "$domain" --ecc \
+        --cert-file "$crt" --key-file "$key" \
+        --reloadcmd "$(command -v bash) $(readlink -f "$0") restart"
+    info "证书已安装: $crt"
+}
+
+# ════════════════════════════════════════════════════════════
+#  ██████╗ ███████╗██████╗ ██╗      ██████╗ ██╗   ██╗
+#  ██╔══██╗██╔════╝██╔══██╗██║     ██╔═══██╗╚██╗ ██╔╝
+#  ██║  ██║█████╗  ██████╔╝██║     ██║   ██║ ╚████╔╝
+#  ██║  ██║██╔══╝  ██╔═══╝ ██║     ██║   ██║  ╚██╔╝
+#  ██████╔╝███████╗██║     ███████╗╚██████╔╝   ██║
+#  ╚═════╝ ╚══════╝╚═╝     ╚══════╝ ╚═════╝    ╚═╝
+#           MODE: 部署机 (落地机)
+# ════════════════════════════════════════════════════════════
+
+# 全局:存放当前安装的所有入站 JSON 片段
+declare -a ALL_INBOUNDS=()
+declare -a ALL_LINKS=()
+
+# ────── 公共参数收集:连接IP/域名 ──────
+ask_connect_addr() {
+    local auto_ip; auto_ip=$(get_public_ip)
+    echo ""
+    echo "  节点链接中使用的连接地址:"
+    echo "  ① 自动检测公网IP: ${C_CYAN}${auto_ip:-检测失败}${NC}"
+    echo "  ② 手动输入 IP 或 DDNS 域名"
+    ask "选择 [1/2] 默认1: "; read -r opt
+    if [[ "$opt" == "2" ]]; then
+        ask "输入 IP 或域名: "; read -r CONNECT_ADDR
+        [[ -z "$CONNECT_ADDR" ]] && CONNECT_ADDR="${auto_ip:-127.0.0.1}"
+    else
+        CONNECT_ADDR="${auto_ip:-127.0.0.1}"
+    fi
+    info "连接地址: $CONNECT_ADDR"
+}
+
+# ────── 多用户输入 ──────
+ask_multi_user_count() {
+    ask "生成节点数量 (1-10, 回车默认1): "; read -r cnt
+    [[ "$cnt" =~ ^[1-9][0-9]?$ ]] || cnt=1
+    [[ "$cnt" -gt 10 ]] && cnt=10
+    echo "$cnt"
+}
+
+# ────── 协议 1: VLESS + XTLS-Reality ──────
+deploy_vless_reality() {
+    step "配置 VLESS + XTLS-Reality"
+
+    local port sni
     ask "监听端口 (回车随机): "; read -r port
     [[ -z "$port" ]] && port=$(random_port)
 
     echo ""
-    echo "  推荐 SNI: www.cloudflare.com / www.microsoft.com / www.amazon.com"
-    ask "伪装 SNI [默认 www.cloudflare.com]: "; read -r sni
+    echo "  SNI 用于伪装 TLS 握手,建议选目标国大型网站:"
+    echo "  推荐: www.cloudflare.com / www.microsoft.com / www.apple.com / dl.google.com"
+    ask "输入 SNI [默认 www.cloudflare.com]: "; read -r sni
     [[ -z "$sni" ]] && sni="www.cloudflare.com"
 
-    uuid=$(gen_uuid)
+    # 生成 Reality 密钥对(全局复用)
     local keypair; keypair=$("$SB_BIN" generate reality-keypair)
     local priv_key; priv_key=$(echo "$keypair" | awk '/PrivateKey/{print $2}')
     local pub_key;  pub_key=$(echo  "$keypair" | awk '/PublicKey/{print $2}')
-    local short_id; short_id=$(gen_rand_hex 8)
 
-    INBOUND_FRAGMENT=$(cat <<JSON
+    local user_count; user_count=$(ask_multi_user_count)
+    local users_json="["
+    local first=true
+
+    for i in $(seq 1 "$user_count"); do
+        local uuid; uuid=$(gen_uuid)
+        local short_id; short_id=$(gen_rand_hex 8)
+        local tag="user${i}"
+
+        $first || users_json+=","
+        first=false
+        users_json+="{\"uuid\":\"${uuid}\",\"flow\":\"xtls-rprx-vision\",\"name\":\"${tag}\"}"
+
+        local link="vless://${uuid}@${CONNECT_ADDR}:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${sni}&fp=chrome&pbk=${pub_key}&sid=${short_id}&type=tcp#VOLSB-Reality-${i}"
+        ALL_LINKS+=("$link")
+
+        cat >> "$SB_INFO" <<INFO
+  [VLESS-Reality #${i}]
+    地址     : ${CONNECT_ADDR}
+    端口     : ${port}
+    UUID     : ${uuid}
+    SNI      : ${sni}
+    PublicKey: ${pub_key}
+    ShortID  : ${short_id}
+    Flow     : xtls-rprx-vision
+    链接     : ${link}
+INFO
+    done
+    users_json+="]"
+
+    ALL_INBOUNDS+=("$(cat <<JSON
+{
+  "type": "vless",
+  "tag": "vless-reality-in",
+  "listen": "::",
+  "listen_port": ${port},
+  "users": ${users_json},
+  "tls": {
+    "enabled": true,
+    "server_name": "${sni}",
+    "reality": {
+      "enabled": true,
+      "handshake": {"server": "${sni}", "server_port": 443},
+      "private_key": "${priv_key}",
+      "short_id": [$(
+          # 为每个 short_id 补充到数组(已记录在link里,这里重新生成相同逻辑)
+          ids=(); for _ in $(seq 1 "$user_count"); do ids+=("\"$(gen_rand_hex 8)\""); done
+          IFS=','; echo "${ids[*]}"
+      )]
+    }
+  }
+}
+JSON
+)")
+
+    open_port "$port" tcp
+    info "✓ VLESS-Reality | 端口:$port | 用户数:$user_count | SNI:$sni"
+}
+
+# ────── 协议 2: Hysteria2 ──────
+deploy_hysteria2() {
+    step "配置 Hysteria2"
+
+    local port; ask "监听端口 (回车随机): "; read -r port
+    [[ -z "$port" ]] && port=$(random_port)
+
+    local masq_domain cert_path key_path insecure="true"
+    echo "  TLS 证书:"
+    echo "   1) 自签证书 (客户端需开 insecure)  2) Let's Encrypt 正式证书"
+    ask "选择 [1/2] 默认1: "; read -r cc; [[ -z "$cc" ]] && cc="1"
+    if [[ "$cc" == "2" ]]; then
+        ask "域名: "; read -r masq_domain; [[ -z "$masq_domain" ]] && die "域名不能为空"
+        acme_issue "$masq_domain"
+        cert_path="${SB_CERT_DIR}/${masq_domain}.crt"
+        key_path="${SB_CERT_DIR}/${masq_domain}.key"
+        insecure="false"
+    else
+        masq_domain="bing.com"
+        local pair; pair=$(gen_self_cert "$masq_domain")
+        cert_path="${pair%%:*}"; key_path="${pair##*:}"
+    fi
+
+    local user_count; user_count=$(ask_multi_user_count)
+    local users_json="["; local first=true
+    for i in $(seq 1 "$user_count"); do
+        local pwd; pwd=$(gen_rand_str 24)
+        $first || users_json+=","
+        first=false
+        users_json+="{\"password\":\"${pwd}\"}"
+        local ins_param=""; [[ "$insecure" == "true" ]] && ins_param="&insecure=1"
+        local link="hysteria2://${pwd}@${CONNECT_ADDR}:${port}/?sni=${masq_domain}${ins_param}#VOLSB-HY2-${i}"
+        ALL_LINKS+=("$link")
+        cat >> "$SB_INFO" <<INFO
+  [Hysteria2 #${i}]
+    地址     : ${CONNECT_ADDR}
+    端口     : ${port} (UDP)
+    密码     : ${pwd}
+    SNI      : ${masq_domain}
+    跳过验证 : ${insecure}
+    链接     : ${link}
+INFO
+    done
+    users_json+="]"
+
+    ALL_INBOUNDS+=("$(cat <<JSON
+{
+  "type": "hysteria2",
+  "tag": "hysteria2-in",
+  "listen": "::",
+  "listen_port": ${port},
+  "users": ${users_json},
+  "tls": {
+    "enabled": true,
+    "alpn": ["h3"],
+    "certificate_path": "${cert_path}",
+    "key_path": "${key_path}"
+  }
+}
+JSON
+)")
+
+    open_port "$port" udp
+    info "✓ Hysteria2 | 端口:$port (UDP) | 用户数:$user_count"
+}
+
+# ────── 协议 3: VMess + WebSocket ──────
+deploy_vmess_ws() {
+    step "配置 VMess + WebSocket"
+    local port ws_path
+    ask "监听端口 (回车随机, 建议80): "; read -r port; [[ -z "$port" ]] && port=$(random_port)
+    ask "WebSocket 路径 (回车随机): "; read -r ws_path
+    [[ -z "$ws_path" ]] && ws_path="/$(gen_rand_hex 6)"
+    [[ "${ws_path:0:1}" != "/" ]] && ws_path="/${ws_path}"
+
+    local user_count; user_count=$(ask_multi_user_count)
+    local users_json="["; local first=true
+    for i in $(seq 1 "$user_count"); do
+        local uuid; uuid=$(gen_uuid)
+        $first || users_json+=","
+        first=false
+        users_json+="{\"uuid\":\"${uuid}\",\"alterId\":0}"
+        local vmjson="{\"v\":\"2\",\"ps\":\"VOLSB-VMess-${i}\",\"add\":\"${CONNECT_ADDR}\",\"port\":\"${port}\",\"id\":\"${uuid}\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"\",\"path\":\"${ws_path}\",\"tls\":\"\"}"
+        local b64; b64=$(echo -n "$vmjson" | base64 -w0)
+        local link="vmess://${b64}"
+        ALL_LINKS+=("$link")
+        cat >> "$SB_INFO" <<INFO
+  [VMess-WS #${i}]
+    地址     : ${CONNECT_ADDR}
+    端口     : ${port}
+    UUID     : ${uuid}
+    路径     : ${ws_path}
+    链接     : ${link}
+INFO
+    done
+    users_json+="]"
+
+    ALL_INBOUNDS+=("$(cat <<JSON
+{
+  "type": "vmess",
+  "tag": "vmess-ws-in",
+  "listen": "::",
+  "listen_port": ${port},
+  "users": ${users_json},
+  "transport": {"type": "ws", "path": "${ws_path}"}
+}
+JSON
+)")
+
+    open_port "$port" tcp
+    info "✓ VMess-WS | 端口:$port | 路径:$ws_path | 用户数:$user_count"
+}
+
+# ────── 协议 4: Trojan + TLS ──────
+deploy_trojan() {
+    step "配置 Trojan + TLS"
+    local port; ask "监听端口 (回车默认443): "; read -r port; [[ -z "$port" ]] && port=443
+    local masq_domain cert_path key_path insecure="true"
+    echo "  TLS 证书:  1) 自签  2) Let's Encrypt"
+    ask "选择 [1/2] 默认1: "; read -r cc; [[ -z "$cc" ]] && cc="1"
+    if [[ "$cc" == "2" ]]; then
+        ask "域名: "; read -r masq_domain; [[ -z "$masq_domain" ]] && die "域名不能为空"
+        acme_issue "$masq_domain"
+        cert_path="${SB_CERT_DIR}/${masq_domain}.crt"
+        key_path="${SB_CERT_DIR}/${masq_domain}.key"
+        insecure="false"
+    else
+        masq_domain="bing.com"
+        local pair; pair=$(gen_self_cert "$masq_domain")
+        cert_path="${pair%%:*}"; key_path="${pair##*:}"
+    fi
+
+    local user_count; user_count=$(ask_multi_user_count)
+    local users_json="["; local first=true
+    for i in $(seq 1 "$user_count"); do
+        local pwd; pwd=$(gen_rand_str 24)
+        $first || users_json+=","
+        first=false
+        users_json+="{\"password\":\"${pwd}\"}"
+        local ins_param=""; [[ "$insecure" == "true" ]] && ins_param="&allowInsecure=1"
+        local link="trojan://${pwd}@${CONNECT_ADDR}:${port}?sni=${masq_domain}${ins_param}#VOLSB-Trojan-${i}"
+        ALL_LINKS+=("$link")
+        cat >> "$SB_INFO" <<INFO
+  [Trojan #${i}]
+    地址     : ${CONNECT_ADDR}
+    端口     : ${port}
+    密码     : ${pwd}
+    SNI      : ${masq_domain}
+    跳过验证 : ${insecure}
+    链接     : ${link}
+INFO
+    done
+    users_json+="]"
+
+    ALL_INBOUNDS+=("$(cat <<JSON
+{
+  "type": "trojan",
+  "tag": "trojan-in",
+  "listen": "::",
+  "listen_port": ${port},
+  "users": ${users_json},
+  "tls": {
+    "enabled": true,
+    "certificate_path": "${cert_path}",
+    "key_path": "${key_path}"
+  }
+}
+JSON
+)")
+
+    open_port "$port" tcp
+    info "✓ Trojan | 端口:$port | 用户数:$user_count"
+}
+
+# ────── 协议 5: ShadowTLS v3 + Shadowsocks ──────
+deploy_shadowtls() {
+    step "配置 ShadowTLS v3 + Shadowsocks"
+    local stls_port sni
+    ask "ShadowTLS 监听端口 (回车随机): "; read -r stls_port
+    [[ -z "$stls_port" ]] && stls_port=$(random_port)
+    echo "  推荐 SNI: www.bing.com / www.apple.com / gateway.icloud.com"
+    ask "伪装 SNI [默认 www.bing.com]: "; read -r sni; [[ -z "$sni" ]] && sni="www.bing.com"
+
+    local ss_port; ss_port=$(random_port)
+    local user_count; user_count=$(ask_multi_user_count)
+    local stls_users="["; local ss_users="["; local first=true
+
+    for i in $(seq 1 "$user_count"); do
+        local sp; sp=$(gen_rand_str 32)
+        local ssp; ssp=$(gen_rand_str 32)
+        $first || { stls_users+=","; ss_users+=","; }
+        first=false
+        stls_users+="{\"name\":\"user${i}\",\"password\":\"${sp}\"}"
+        ss_users+="{\"name\":\"user${i}\",\"password\":\"${ssp}\"}"
+        cat >> "$SB_INFO" <<INFO
+  [ShadowTLS v3 #${i}]
+    地址         : ${CONNECT_ADDR}
+    ShadowTLS 端口: ${stls_port}
+    ShadowTLS 密码: ${sp}
+    SS 内层密码  : ${ssp}
+    SS 加密      : 2022-blake3-aes-128-gcm
+    伪装 SNI     : ${sni}
+    [客户端配置见: https://sing-box.sagernet.org/configuration/outbound/shadowtls/]
+INFO
+    done
+    stls_users+="]"; ss_users+="]"
+
+    ALL_INBOUNDS+=("$(cat <<JSON
+{
+  "type": "shadowtls",
+  "tag": "shadowtls-in",
+  "listen": "::",
+  "listen_port": ${stls_port},
+  "version": 3,
+  "users": ${stls_users},
+  "handshake": {"server": "${sni}", "server_port": 443},
+  "detour": "ss-backend-in"
+}
+JSON
+)")
+    ALL_INBOUNDS+=("$(cat <<JSON
+{
+  "type": "shadowsocks",
+  "tag": "ss-backend-in",
+  "listen": "127.0.0.1",
+  "listen_port": ${ss_port},
+  "method": "2022-blake3-aes-128-gcm",
+  "users": ${ss_users}
+}
+JSON
+)")
+    open_port "$stls_port" tcp
+    info "✓ ShadowTLS v3 | 端口:$stls_port | 用户数:$user_count | SNI:$sni"
+}
+
+# ════════════════════════════════════════════════════════════
+#  线路机 (中转机) 模式
+#  原理: VLESS-Reality 入站 → Shadowsocks 出站 → 落地机
+# ════════════════════════════════════════════════════════════
+
+deploy_relay() {
+    step "线路机模式部署"
+    echo ""
+    warn "线路机模式: 本机接收 VLESS-Reality 流量,转发至落地机 Shadowsocks 节点"
+    echo ""
+
+    # ── 落地机信息 ──
+    banner "落地机 (Shadowsocks) 信息"
+    ask "落地机 IP 或域名: "; read -r LAND_ADDR
+    [[ -z "$LAND_ADDR" ]] && die "落地机地址不能为空"
+    ask "落地机 SS 端口: "; read -r LAND_PORT
+    [[ -z "$LAND_PORT" ]] && die "落地机端口不能为空"
+    ask "落地机 SS 密码: "; read -r LAND_PASS
+    [[ -z "$LAND_PASS" ]] && die "落地机密码不能为空"
+    echo "  加密方式:  1) 2022-blake3-aes-128-gcm (推荐)  2) aes-256-gcm  3) chacha20-ietf-poly1305"
+    ask "选择 [1-3] 默认1: "; read -r enc_choice
+    case "${enc_choice:-1}" in
+        2) LAND_METHOD="aes-256-gcm" ;;
+        3) LAND_METHOD="chacha20-ietf-poly1305" ;;
+        *)  LAND_METHOD="2022-blake3-aes-128-gcm" ;;
+    esac
+
+    # ── 线路机入站 (VLESS-Reality) ──
+    banner "线路机入站配置"
+    ask_connect_addr  # 获取线路机自身公网IP
+
+    local in_port sni
+    ask "入站端口 (回车随机): "; read -r in_port; [[ -z "$in_port" ]] && in_port=$(random_port)
+    echo "  SNI 推荐: www.cloudflare.com / www.microsoft.com"
+    ask "伪装 SNI [默认 www.cloudflare.com]: "; read -r sni; [[ -z "$sni" ]] && sni="www.cloudflare.com"
+
+    local keypair; keypair=$("$SB_BIN" generate reality-keypair)
+    local priv_key; priv_key=$(echo "$keypair" | awk '/PrivateKey/{print $2}')
+    local pub_key;  pub_key=$(echo  "$keypair" | awk '/PublicKey/{print $2}')
+
+    local user_count; user_count=$(ask_multi_user_count)
+    local users_json="["; local short_ids="["; local first=true
+
+    for i in $(seq 1 "$user_count"); do
+        local uuid; uuid=$(gen_uuid)
+        local sid; sid=$(gen_rand_hex 8)
+        $first || { users_json+=","; short_ids+=","; }
+        first=false
+        users_json+="{\"uuid\":\"${uuid}\",\"flow\":\"xtls-rprx-vision\"}"
+        short_ids+="\"${sid}\""
+        local link="vless://${uuid}@${CONNECT_ADDR}:${in_port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${sni}&fp=chrome&pbk=${pub_key}&sid=${sid}&type=tcp#VOLSB-Relay-${i}"
+        ALL_LINKS+=("$link")
+        cat >> "$SB_INFO" <<INFO
+  [线路机 VLESS-Reality #${i}]
+    连接地址  : ${CONNECT_ADDR}
+    端口      : ${in_port}
+    UUID      : ${uuid}
+    PublicKey : ${pub_key}
+    ShortID   : ${sid}
+    落地机    : ${LAND_ADDR}:${LAND_PORT}
+    链接      : ${link}
+INFO
+    done
+    users_json+="]"; short_ids+="]"
+
+    # ── 写入配置 ──
+    mkdir -p "$SB_CONF_DIR"
+    cat > "$SB_CONFIG" <<JSON
+{
+  "log": {"level": "warn", "output": "${SB_LOG}", "timestamp": true},
+  "inbounds": [
     {
       "type": "vless",
-      "tag": "vless-reality-in",
+      "tag": "vless-relay-in",
       "listen": "::",
-      "listen_port": ${port},
-      "users": [{ "uuid": "${uuid}", "flow": "xtls-rprx-vision" }],
+      "listen_port": ${in_port},
+      "users": ${users_json},
       "tls": {
         "enabled": true,
         "server_name": "${sni}",
         "reality": {
           "enabled": true,
-          "handshake": { "server": "${sni}", "server_port": 443 },
+          "handshake": {"server": "${sni}", "server_port": 443},
           "private_key": "${priv_key}",
-          "short_id": ["${short_id}"]
+          "short_id": ${short_ids}
         }
       }
     }
-JSON
-)
-    open_ports "$port" "tcp"
-
-    local ip; ip=$(get_public_ip)
-    local link="vless://${uuid}@${ip}:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${sni}&fp=chrome&pbk=${pub_key}&sid=${short_id}&type=tcp#VLESS-Reality"
-
-    cat >> "$SB_INFO_FILE" <<INFO
-
-━━━━ VLESS + XTLS-Reality ━━━━
-  地址      : ${ip}
-  端口      : ${port}
-  UUID      : ${uuid}
-  Flow      : xtls-rprx-vision
-  伪装 SNI  : ${sni}
-  PublicKey : ${pub_key}
-  ShortID   : ${short_id}
-  分享链接  : ${link}
-INFO
-    info "✓ VLESS-Reality  端口=$port  SNI=$sni"
-}
-
-configure_hysteria2() {
-    step "Hysteria2 参数配置"
-    local port password cert_path key_path masq_domain tls_insecure=true
-
-    ask "监听端口 (回车随机): "; read -r port
-    [[ -z "$port" ]] && port=$(random_port)
-
-    ask "连接密码 (回车随机生成): "; read -r password
-    [[ -z "$password" ]] && password=$(gen_rand_str 24)
-
-    echo ""
-    echo "  TLS 证书选项:"
-    echo "   1) 自签证书  (客户端需开启 insecure/跳过验证)"
-    echo "   2) Let's Encrypt 正式证书 (需域名已解析到本机)"
-    ask "选择 [1/2] 默认1: "; read -r cchoice
-    [[ -z "$cchoice" ]] && cchoice="1"
-
-    if [[ "$cchoice" == "2" ]]; then
-        ask "输入域名: "; read -r domain
-        [[ -z "$domain" ]] && die "域名不能为空"
-        _acme_issue "$domain"
-        cert_path="${SB_CERT_DIR}/${domain}.crt"
-        key_path="${SB_CERT_DIR}/${domain}.key"
-        masq_domain="$domain"; tls_insecure=false
-    else
-        masq_domain="bing.com"
-        local pair; pair=$(gen_self_cert "$masq_domain")
-        cert_path="${pair%%:*}"; key_path="${pair##*:}"
-    fi
-
-    INBOUND_FRAGMENT=$(cat <<JSON
-    {
-      "type": "hysteria2",
-      "tag": "hysteria2-in",
-      "listen": "::",
-      "listen_port": ${port},
-      "users": [{ "password": "${password}" }],
-      "tls": {
-        "enabled": true,
-        "alpn": ["h3"],
-        "certificate_path": "${cert_path}",
-        "key_path": "${key_path}"
-      }
-    }
-JSON
-)
-    open_ports "$port" "udp"
-
-    local ip; ip=$(get_public_ip)
-    local insecure_p=""; $tls_insecure && insecure_p="&insecure=1"
-    local link="hysteria2://${password}@${ip}:${port}/?sni=${masq_domain}${insecure_p}#Hysteria2"
-
-    cat >> "$SB_INFO_FILE" <<INFO
-
-━━━━ Hysteria2 ━━━━
-  地址      : ${ip}
-  端口      : ${port} (UDP)
-  密码      : ${password}
-  SNI       : ${masq_domain}
-  跳过证书  : ${tls_insecure}
-  分享链接  : ${link}
-INFO
-    info "✓ Hysteria2  端口=$port (UDP)"
-}
-
-configure_vmess_ws() {
-    step "VMess + WebSocket 参数配置"
-    local port uuid ws_path
-
-    ask "监听端口 (回车随机, 建议80): "; read -r port
-    [[ -z "$port" ]] && port=$(random_port)
-
-    ask "WebSocket 路径 (回车随机生成): "; read -r ws_path
-    [[ -z "$ws_path" ]] && ws_path="/$(gen_rand_hex 6)"
-    [[ "${ws_path:0:1}" != "/" ]] && ws_path="/${ws_path}"
-
-    uuid=$(gen_uuid)
-
-    INBOUND_FRAGMENT=$(cat <<JSON
-    {
-      "type": "vmess",
-      "tag": "vmess-ws-in",
-      "listen": "::",
-      "listen_port": ${port},
-      "users": [{ "uuid": "${uuid}", "alterId": 0 }],
-      "transport": { "type": "ws", "path": "${ws_path}" }
-    }
-JSON
-)
-    open_ports "$port" "tcp"
-
-    local ip; ip=$(get_public_ip)
-    local vmess_obj="{\"v\":\"2\",\"ps\":\"VMess-WS\",\"add\":\"${ip}\",\"port\":\"${port}\",\"id\":\"${uuid}\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"\",\"path\":\"${ws_path}\",\"tls\":\"\"}"
-    local b64; b64=$(echo -n "$vmess_obj" | base64 -w0)
-    local link="vmess://${b64}"
-
-    cat >> "$SB_INFO_FILE" <<INFO
-
-━━━━ VMess + WebSocket ━━━━
-  地址      : ${ip}
-  端口      : ${port}
-  UUID      : ${uuid}
-  AlterID   : 0
-  加密      : auto
-  传输      : ws
-  路径      : ${ws_path}
-  TLS       : 无 (建议套 CDN 或 Nginx TLS 反代)
-  分享链接  : ${link}
-INFO
-    info "✓ VMess-WS  端口=$port  路径=$ws_path"
-}
-
-configure_trojan() {
-    step "Trojan + TLS 参数配置"
-    local port password cert_path key_path masq_domain tls_insecure=true
-
-    ask "监听端口 (回车默认443): "; read -r port
-    [[ -z "$port" ]] && port=443
-
-    ask "密码 (回车随机生成): "; read -r password
-    [[ -z "$password" ]] && password=$(gen_rand_str 24)
-
-    echo ""
-    echo "  TLS 证书选项:"
-    echo "   1) 自签证书  (客户端需开启 allowInsecure)"
-    echo "   2) Let's Encrypt 正式证书"
-    ask "选择 [1/2] 默认1: "; read -r cchoice
-    [[ -z "$cchoice" ]] && cchoice="1"
-
-    if [[ "$cchoice" == "2" ]]; then
-        ask "输入域名: "; read -r domain
-        [[ -z "$domain" ]] && die "域名不能为空"
-        _acme_issue "$domain"
-        cert_path="${SB_CERT_DIR}/${domain}.crt"
-        key_path="${SB_CERT_DIR}/${domain}.key"
-        masq_domain="$domain"; tls_insecure=false
-    else
-        masq_domain="bing.com"
-        local pair; pair=$(gen_self_cert "$masq_domain")
-        cert_path="${pair%%:*}"; key_path="${pair##*:}"
-    fi
-
-    INBOUND_FRAGMENT=$(cat <<JSON
-    {
-      "type": "trojan",
-      "tag": "trojan-in",
-      "listen": "::",
-      "listen_port": ${port},
-      "users": [{ "password": "${password}" }],
-      "tls": {
-        "enabled": true,
-        "certificate_path": "${cert_path}",
-        "key_path": "${key_path}"
-      }
-    }
-JSON
-)
-    open_ports "$port" "tcp"
-
-    local ip; ip=$(get_public_ip)
-    local insecure_p=""; $tls_insecure && insecure_p="&allowInsecure=1"
-    local link="trojan://${password}@${ip}:${port}?sni=${masq_domain}${insecure_p}#Trojan"
-
-    cat >> "$SB_INFO_FILE" <<INFO
-
-━━━━ Trojan + TLS ━━━━
-  地址      : ${ip}
-  端口      : ${port}
-  密码      : ${password}
-  SNI       : ${masq_domain}
-  跳过证书  : ${tls_insecure}
-  分享链接  : ${link}
-INFO
-    info "✓ Trojan  端口=$port"
-}
-
-configure_shadowtls() {
-    step "ShadowTLS v3 + Shadowsocks 参数配置"
-    local stls_port sni
-
-    ask "ShadowTLS 监听端口 (回车随机): "; read -r stls_port
-    [[ -z "$stls_port" ]] && stls_port=$(random_port)
-
-    echo "  推荐 SNI: www.bing.com / www.apple.com / gateway.icloud.com"
-    ask "伪装 SNI [默认 www.bing.com]: "; read -r sni
-    [[ -z "$sni" ]] && sni="www.bing.com"
-
-    local ss_port; ss_port=$(random_port)
-    local stls_pass; stls_pass=$(gen_rand_str 32)
-    local ss_pass; ss_pass=$(gen_rand_str 32)
-
-    local stls_frag; stls_frag=$(cat <<JSON
-    {
-      "type": "shadowtls",
-      "tag": "shadowtls-in",
-      "listen": "::",
-      "listen_port": ${stls_port},
-      "version": 3,
-      "users": [{ "password": "${stls_pass}" }],
-      "handshake": { "server": "${sni}", "server_port": 443 },
-      "detour": "ss-backend-in"
-    }
-JSON
-)
-    local ss_frag; ss_frag=$(cat <<JSON
+  ],
+  "outbounds": [
     {
       "type": "shadowsocks",
-      "tag": "ss-backend-in",
-      "listen": "127.0.0.1",
-      "listen_port": ${ss_port},
-      "method": "2022-blake3-aes-128-gcm",
-      "password": "${ss_pass}"
-    }
+      "tag": "ss-land",
+      "server": "${LAND_ADDR}",
+      "server_port": ${LAND_PORT},
+      "method": "${LAND_METHOD}",
+      "password": "${LAND_PASS}"
+    },
+    {"type": "direct", "tag": "direct"},
+    {"type": "block",  "tag": "block"}
+  ],
+  "route": {
+    "rules": [{"inbound": ["vless-relay-in"], "outbound": "ss-land"}],
+    "final": "direct"
+  }
+}
 JSON
-)
 
-    INBOUND_FRAGMENT="${stls_frag}::SPLIT::${ss_frag}"
-    open_ports "$stls_port" "tcp"
+    open_port "$in_port" tcp
+    info "✓ 线路机配置完成 | 入站端口:$in_port → 落地:${LAND_ADDR}:${LAND_PORT}"
 
-    local ip; ip=$(get_public_ip)
-
-    cat >> "$SB_INFO_FILE" <<INFO
-
-━━━━ ShadowTLS v3 + Shadowsocks ━━━━
-  地址            : ${ip}
-  ShadowTLS 端口  : ${stls_port}
-  ShadowTLS 密码  : ${stls_pass}
-  SS 内层密码     : ${ss_pass}
-  SS 加密方式     : 2022-blake3-aes-128-gcm
-  伪装 SNI        : ${sni}
-  [客户端需同时配置 shadowtls outbound + ss outbound 并设置 detour 关联]
-INFO
-    info "✓ ShadowTLS v3  端口=$stls_port  SNI=$sni"
+    # ── 生成回到落地机的一键线路机安装命令 ──
+    banner "一键安装命令 (在其他线路机上执行)"
+    echo ""
+    echo -e "  ${C_YELLOW}以下命令可直接在其他 VPS 上运行,生成相同配置的线路机:${NC}"
+    echo ""
+    local script_url="https://raw.githubusercontent.com/your-repo/volsb/main/volsb.sh"
+    echo -e "  ${C_CYAN}bash <(curl -fsSL ${script_url}) relay \\
+    --land-addr '${LAND_ADDR}' \\
+    --land-port '${LAND_PORT}' \\
+    --land-pass '${LAND_PASS}' \\
+    --land-method '${LAND_METHOD}'${NC}"
+    echo ""
 }
 
-# ======================== acme.sh 证书申请 ========================
-_acme_issue() {
-    local domain="$1"
-    local crt="${SB_CERT_DIR}/${domain}.crt"
-    local key="${SB_CERT_DIR}/${domain}.key"
-    [[ -f "$crt" && -f "$key" ]] && { info "证书已存在,跳过: $crt"; return; }
-
-    info "安装 acme.sh 并申请证书 ..."
-    systemctl stop sing-box 2>/dev/null || true
-
-    if [[ ! -f ~/.acme.sh/acme.sh ]]; then
-        curl -fsSL https://get.acme.sh | sh -s "email=acme@${domain}" >/dev/null 2>&1 \
-            || die "acme.sh 安装失败"
-    fi
-
-    ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt >/dev/null 2>&1
-    ~/.acme.sh/acme.sh --issue -d "$domain" --standalone -k ec-256 --httpport 80 \
-        || die "证书申请失败,请确认域名已解析到本机且 80 端口可访问"
-    ~/.acme.sh/acme.sh --install-cert -d "$domain" --ecc \
-        --cert-file "$crt" --key-file "$key" \
-        --reloadcmd "systemctl restart sing-box"
-
-    info "证书已安装: $crt"
-}
-
-# ======================== 协议选择菜单 ========================
-SELECTED_PROTOS=()
+# ════════════════════════════════════════════════════════════
+#  配置组装 & 写入
+# ════════════════════════════════════════════════════════════
 
 select_protocols() {
     clear
-    echo -e "${BOLD}${CYAN}"
+    echo -e "${C_BOLD}${C_CYAN}"
     cat <<'BANNER'
-  ┌─────────────────────────────────────────────┐
-  │         sing-box 服务端协议配置             │
-  └─────────────────────────────────────────────┘
+  ┌──────────────────────────────────────────────────────┐
+  │        VOLSB — 部署机协议选择                        │
+  └──────────────────────────────────────────────────────┘
 BANNER
     echo -e "${NC}"
     hr
-    printf "  %-4s %-30s %s\n" "序号" "协议" "说明"
+    printf "  ${C_BOLD}%-5s %-30s %-10s %s${NC}\n" "序号" "协议" "传输" "说明"
     hr
-    printf "  ${BOLD}%-4s${NC} %-30s %s\n" "1)" "VLESS + XTLS-Reality"  "★ 推荐 | 抗审查首选,无需域名"
-    printf "  ${BOLD}%-4s${NC} %-30s %s\n" "2)" "Hysteria2"              "★ 推荐 | UDP加速,弱网体验佳"
-    printf "  ${BOLD}%-4s${NC} %-30s %s\n" "3)" "VMess + WebSocket"      "  适合套 CDN / Nginx TLS 反代"
-    printf "  ${BOLD}%-4s${NC} %-30s %s\n" "4)" "Trojan + TLS"           "  经典方案,客户端兼容性好"
-    printf "  ${BOLD}%-4s${NC} %-30s %s\n" "5)" "ShadowTLS v3 + SS"      "  流量伪装为真实 TLS 握手"
-    printf "  ${BOLD}%-4s${NC} %-30s %s\n" "0)" "全部"                   "  同时部署以上所有协议"
+    printf "  ${C_BOLD}%-5s${NC} %-30s %-10s %s\n" "1)" "VLESS + XTLS-Reality"     "TCP"   "★ 推荐 | 抗审查首选,无需域名"
+    printf "  ${C_BOLD}%-5s${NC} %-30s %-10s %s\n" "2)" "Hysteria2"                "UDP"   "★ 推荐 | 高速UDP,弱网友好"
+    printf "  ${C_BOLD}%-5s${NC} %-30s %-10s %s\n" "3)" "VMess + WebSocket"        "TCP/WS" "适合套 CDN / Nginx 反代"
+    printf "  ${C_BOLD}%-5s${NC} %-30s %-10s %s\n" "4)" "Trojan + TLS"             "TCP"   "经典方案,广泛兼容"
+    printf "  ${C_BOLD}%-5s${NC} %-30s %-10s %s\n" "5)" "ShadowTLS v3 + SS"        "TCP"   "真实 TLS 握手伪装"
+    printf "  ${C_BOLD}%-5s${NC} %-30s %-10s %s\n" "0)" "全部协议"                 "-"     "同时部署以上所有"
     hr
     echo ""
-    echo "  支持多选,空格分隔  例如: ${CYAN}1 2${NC}  或  ${CYAN}1 4${NC}"
+    echo "  支持多选: ${C_CYAN}1 2${NC}  ${C_CYAN}1 2 4${NC}  ${C_CYAN}0${NC}(全部)"
     echo ""
-    ask "请选择协议 [0-5]: "; read -r input
-    [[ -z "$input" ]] && input="1"
-    [[ "$input" =~ ^0$ ]] && input="1 2 3 4 5"
+    ask "请选择协议 [0-5]: "; read -r raw_input
+    [[ -z "$raw_input" ]] && raw_input="1"
+    [[ "$raw_input" == "0" ]] && raw_input="1 2 3 4 5"
 
     SELECTED_PROTOS=()
-    for num in $input; do
-        case "$num" in
+    for n in $raw_input; do
+        case "$n" in
             1) SELECTED_PROTOS+=("vless_reality") ;;
             2) SELECTED_PROTOS+=("hysteria2") ;;
             3) SELECTED_PROTOS+=("vmess_ws") ;;
             4) SELECTED_PROTOS+=("trojan") ;;
             5) SELECTED_PROTOS+=("shadowtls") ;;
-            *) warn "忽略无效输入: $num" ;;
+            *) warn "忽略无效输入: $n" ;;
         esac
     done
     [[ ${#SELECTED_PROTOS[@]} -eq 0 ]] && die "未选择任何协议"
-
-    local labels=()
-    for p in "${SELECTED_PROTOS[@]}"; do
-        case "$p" in
-            vless_reality) labels+=("VLESS-Reality") ;;
-            hysteria2)     labels+=("Hysteria2") ;;
-            vmess_ws)      labels+=("VMess-WS") ;;
-            trojan)        labels+=("Trojan") ;;
-            shadowtls)     labels+=("ShadowTLS-v3") ;;
-        esac
-    done
-    echo ""; info "已选择: ${labels[*]}"
 }
 
-# ======================== 配置组装 ========================
-assemble_config() {
-    local all_inbounds=()
+assemble_and_write_config() {
+    ALL_INBOUNDS=()
+    ALL_LINKS=()
 
     for proto in "${SELECTED_PROTOS[@]}"; do
-        INBOUND_FRAGMENT=""
         case "$proto" in
-            vless_reality) configure_vless_reality ;;
-            hysteria2)     configure_hysteria2 ;;
-            vmess_ws)      configure_vmess_ws ;;
-            trojan)        configure_trojan ;;
-            shadowtls)     configure_shadowtls ;;
+            vless_reality) deploy_vless_reality ;;
+            hysteria2)     deploy_hysteria2 ;;
+            vmess_ws)      deploy_vmess_ws ;;
+            trojan)        deploy_trojan ;;
+            shadowtls)     deploy_shadowtls ;;
         esac
-
-        if [[ "$INBOUND_FRAGMENT" == *"::SPLIT::"* ]]; then
-            all_inbounds+=("${INBOUND_FRAGMENT%%::SPLIT::*}")
-            all_inbounds+=("${INBOUND_FRAGMENT##*::SPLIT::}")
-        else
-            all_inbounds+=("$INBOUND_FRAGMENT")
-        fi
     done
 
-    local joined; joined=$(printf '%s\n' "${all_inbounds[@]}" | jq -s '.')
+    local joined; joined=$(printf '%s\n' "${ALL_INBOUNDS[@]}" | jq -s '.')
 
-    step "写入 sing-box 配置"
+    step "写入配置文件"
     cat > "$SB_CONFIG" <<JSON
 {
   "log": {
@@ -613,237 +843,513 @@ assemble_config() {
   },
   "dns": {
     "servers": [
-      { "tag": "remote", "address": "tls://8.8.8.8",                "detour": "direct" },
-      { "tag": "local",  "address": "https://223.5.5.5/dns-query",   "detour": "direct" }
+      {"tag": "remote", "address": "tls://8.8.8.8",              "detour": "direct"},
+      {"tag": "local",  "address": "https://223.5.5.5/dns-query", "detour": "direct"}
     ],
     "strategy": "prefer_ipv4"
   },
   "inbounds": ${joined},
   "outbounds": [
-    { "type": "direct", "tag": "direct" },
-    { "type": "block",  "tag": "block"  }
+    {"type": "direct", "tag": "direct"},
+    {"type": "block",  "tag": "block"}
   ],
   "route": {
-    "rules": [
-      { "geoip": ["private"], "outbound": "block" }
-    ],
+    "rules": [{"geoip": ["private"], "outbound": "block"}],
     "final": "direct"
   }
 }
 JSON
 
-    if "$SB_BIN" check -c "$SB_CONFIG" &>/dev/null; then
-        info "配置校验通过"
-    else
+    "$SB_BIN" check -c "$SB_CONFIG" &>/dev/null || {
         err "配置校验失败:"
         "$SB_BIN" check -c "$SB_CONFIG"
         exit 1
+    }
+    info "配置写入完成,校验通过"
+
+    # 保存所有分享链接到独立文件
+    printf '%s\n' "${ALL_LINKS[@]}" > "$SB_LINKS"
+}
+
+# ════════════════════════════════════════════════════════════
+#  流量统计
+# ════════════════════════════════════════════════════════════
+
+# sing-box 启用 ClashAPI 后可通过 REST 查询连接/流量
+# 这里用 /proc/net 统计全量入出流量作为轻量实现
+
+TRAFFIC_API_PORT=9090   # Clash兼容API端口,需在config中启用
+
+traffic_init_api() {
+    # 将 ClashAPI 追加到配置 (若尚未有)
+    if ! jq -e '.experimental.clash_api' "$SB_CONFIG" &>/dev/null; then
+        local tmp; tmp=$(mktemp)
+        jq '. + {"experimental": {"clash_api": {"external_controller": "127.0.0.1:'"$TRAFFIC_API_PORT"'", "external_ui": "", "secret": ""}}}' \
+            "$SB_CONFIG" > "$tmp" && mv "$tmp" "$SB_CONFIG"
+        info "已启用 Clash API (127.0.0.1:${TRAFFIC_API_PORT})"
     fi
 }
 
-# ======================== 主功能 ========================
+human_bytes() {
+    local b="$1"
+    if   [[ $b -ge 1073741824 ]]; then printf "%.2f GB" "$(echo "scale=2; $b/1073741824" | bc)"
+    elif [[ $b -ge 1048576 ]];    then printf "%.2f MB" "$(echo "scale=2; $b/1048576" | bc)"
+    elif [[ $b -ge 1024 ]];       then printf "%.2f KB" "$(echo "scale=2; $b/1024" | bc)"
+    else printf "%d B" "$b"; fi
+}
+
+show_traffic() {
+    banner "流量统计"
+    hr
+
+    # 方法1: 通过 Clash API 查询实时连接
+    local api="http://127.0.0.1:${TRAFFIC_API_PORT}"
+    if curl -fsSL --max-time 2 "${api}/version" &>/dev/null; then
+        echo -e "\n  ${C_BOLD}实时流量 (Clash API):${NC}"
+        local traffic; traffic=$(curl -fsSL --max-time 3 "${api}/traffic" 2>/dev/null || echo "")
+        if [[ -n "$traffic" ]]; then
+            local up; up=$(echo "$traffic" | jq -r '.up // 0')
+            local down; down=$(echo "$traffic" | jq -r '.down // 0')
+            printf "  ↑ 上行: %s/s   ↓ 下行: %s/s\n" "$(human_bytes "$up")" "$(human_bytes "$down")"
+        fi
+
+        echo -e "\n  ${C_BOLD}当前活跃连接:${NC}"
+        local conns; conns=$(curl -fsSL --max-time 3 "${api}/connections" 2>/dev/null \
+            | jq -r '.connections[]? | "  \(.metadata.sourceIP):\(.metadata.sourcePort) → \(.metadata.destinationIP):\(.metadata.destinationPort)  [\(.chains[0])]"' \
+            2>/dev/null | head -20)
+        [[ -n "$conns" ]] && echo "$conns" || echo "  (无活跃连接)"
+    fi
+
+    # 方法2: 读取 /proc/net/dev 接口统计
+    echo -e "\n  ${C_BOLD}网卡累计流量:${NC}"
+    local iface; iface=$(ip route 2>/dev/null | awk '/default/{print $5; exit}')
+    if [[ -n "$iface" ]] && [[ -f /proc/net/dev ]]; then
+        local rx tx
+        rx=$(awk -v i="${iface}:" '$1==i{print $2}' /proc/net/dev 2>/dev/null || echo 0)
+        tx=$(awk -v i="${iface}:" '$1==i{print $10}' /proc/net/dev 2>/dev/null || echo 0)
+        printf "  接口: ${C_CYAN}%s${NC}\n" "$iface"
+        printf "  ↓ 总接收: %s\n" "$(human_bytes "${rx:-0}")"
+        printf "  ↑ 总发送: %s\n" "$(human_bytes "${tx:-0}")"
+    fi
+
+    # 方法3: 显示 sing-box 日志最近连接记录
+    echo -e "\n  ${C_BOLD}最近日志记录 (最后20行):${NC}"
+    if [[ -f "$SB_LOG" ]]; then
+        tail -20 "$SB_LOG" | grep -E "accepted|connection|inbound" | \
+            sed 's/^/  /' || echo "  (日志为空)"
+    else
+        echo "  (日志文件不存在)"
+    fi
+
+    hr
+}
+
+reset_traffic_log() {
+    ask "确认清空流量日志? [y/N]: "; read -r ans
+    [[ "$ans" =~ ^[Yy]$ ]] || { info "已取消"; return; }
+    : > "$SB_LOG" 2>/dev/null && info "日志已清空"
+    echo "{}" > "$SB_TRAFFIC"
+}
+
+# ════════════════════════════════════════════════════════════
+#  快捷命令安装
+# ════════════════════════════════════════════════════════════
+
+install_shortcut() {
+    local self; self=$(readlink -f "$0")
+    cat > "$VOLSB_CMD" <<SHORTCUT
+#!/usr/bin/env bash
+exec bash "${self}" "\$@"
+SHORTCUT
+    chmod +x "$VOLSB_CMD"
+    info "快捷命令已安装,现在可以输入 ${C_BOLD}volsb${NC} 进入管理界面"
+}
+
+# ════════════════════════════════════════════════════════════
+#  节点信息展示
+# ════════════════════════════════════════════════════════════
+
+show_nodes() {
+    if [[ ! -f "$SB_INFO" ]]; then
+        warn "节点信息文件不存在,请先安装"; return
+    fi
+    clear
+    echo -e "${C_BOLD}${C_CYAN}"
+    cat <<'HDR'
+  ╔════════════════════════════════════════════════════╗
+  ║              VOLSB — 节点信息总览                  ║
+  ╚════════════════════════════════════════════════════╝
+HDR
+    echo -e "${NC}"
+    cat "$SB_INFO"
+    hr
+
+    if [[ -f "$SB_LINKS" ]]; then
+        echo -e "\n${C_BOLD}  所有分享链接:${NC}"
+        local i=0
+        while IFS= read -r link; do
+            (( i++ )) || true
+            echo -e "  ${C_DIM}[$i]${NC} ${C_CYAN}${link}${NC}"
+            print_qr "$link"
+        done < "$SB_LINKS"
+    fi
+
+    echo ""
+    info "节点文件: $SB_INFO | 链接文件: $SB_LINKS"
+}
+
+# ════════════════════════════════════════════════════════════
+#  端口重置
+# ════════════════════════════════════════════════════════════
+
+reset_ports() {
+    require_root
+    [[ -f "$SB_CONFIG" ]] || { warn "未找到配置文件"; return; }
+    step "重置所有入站端口"
+
+    local tmp; tmp=$(mktemp)
+    # 用 jq 为每个入站生成新随机端口
+    local new_config
+    new_config=$(jq '
+      .inbounds |= map(
+        if .listen_port then
+          .listen_port = (. | to_entries | map(.value) | length * 1000 + (now | floor % 40000) + 10000)
+        else . end
+      )
+    ' "$SB_CONFIG") 2>/dev/null
+
+    # jq 无法用 random,改用 bash 直接替换端口
+    local new_json="$SB_CONFIG"
+    local ports_old; ports_old=$(jq -r '.inbounds[].listen_port // empty' "$SB_CONFIG")
+    local updated; updated=$(cat "$SB_CONFIG")
+    for old_p in $ports_old; do
+        local new_p; new_p=$(random_port)
+        updated=$(echo "$updated" | sed "s/\"listen_port\": ${old_p}/\"listen_port\": ${new_p}/g")
+        info "端口 $old_p → $new_p"
+        open_port "$new_p" tcp; open_port "$new_p" udp
+    done
+    echo "$updated" > "$SB_CONFIG"
+
+    if "$SB_BIN" check -c "$SB_CONFIG" &>/dev/null; then
+        svc_restart && info "端口已重置,服务已重启"
+    else
+        err "配置校验失败,已回滚"
+        cp "$tmp" "$SB_CONFIG" 2>/dev/null || true
+    fi
+    rm -f "$tmp"
+}
+
+# ════════════════════════════════════════════════════════════
+#  主安装流程
+# ════════════════════════════════════════════════════════════
+
+select_deploy_mode() {
+    clear
+    echo -e "${C_BOLD}${C_CYAN}"
+    cat <<'LOGO'
+  ██╗   ██╗ ██████╗ ██╗     ███████╗██████╗
+  ██║   ██║██╔═══██╗██║     ██╔════╝██╔══██╗
+  ██║   ██║██║   ██║██║     ███████╗██████╔╝
+  ╚██╗ ██╔╝██║   ██║██║     ╚════██║██╔══██╗
+   ╚████╔╝ ╚██████╔╝███████╗███████║██████╔╝
+    ╚═══╝   ╚═════╝ ╚══════╝╚══════╝╚═════╝
+LOGO
+    echo -e "  ${C_DIM}sing-box 服务端一键部署管理脚本  v${VOLSB_VER}${NC}"
+    echo -e "${NC}"
+    hr
+    echo ""
+    echo -e "  ${C_BOLD}选择部署模式:${NC}"
+    echo ""
+    printf "  ${C_BOLD}%-5s${NC} ${C_GREEN}%-20s${NC} %s\n" "1)" "部署机 (落地机)" "直接接收客户端流量,出口上网"
+    printf "  ${C_BOLD}%-5s${NC} ${C_YELLOW}%-20s${NC} %s\n" "2)" "线路机 (中转机)" "接收客户端流量后转发至落地机"
+    echo ""
+    hr
+    ask "选择模式 [1/2] 默认1: "; read -r mode
+    [[ -z "$mode" ]] && mode="1"
+    echo "$mode"
+}
+
 do_install() {
-    require_root; detect_os; detect_arch; install_deps; setup_directories
+    require_root
+    detect_os
+    detect_arch
+    install_deps
+    setup_dirs
 
-    local ip; ip=$(get_public_ip)
-    cat > "$SB_INFO_FILE" <<HEADER
-==============================================
-  sing-box 节点信息
-  服务器 IP : ${ip}
-  安装时间  : $(date '+%Y-%m-%d %H:%M:%S')
-==============================================
-HEADER
-
-    step "获取最新版本"
+    step "获取 sing-box 最新版本"
     local ver; ver=$(get_latest_version)
-    info "最新版本: v${ver}"
-
     if [[ -x "$SB_BIN" ]]; then
         local cur; cur=$("$SB_BIN" version 2>/dev/null | awk '{print $3}' | head -1)
-        if [[ "$cur" == "$ver" ]]; then
-            warn "已安装最新版本 v${ver}"
-            ask "仍要重新安装? [y/N]: "; read -r ans
-            [[ "$ans" =~ ^[Yy]$ ]] || { info "跳过二进制安装"; goto_config=true; }
-        fi
+        [[ "$cur" == "$ver" ]] && warn "已是最新版本 v${ver}" || {
+            info "当前 v${cur} → 最新 v${ver}"
+            install_binary "$ver"
+        }
+    else
+        install_binary "$ver"
     fi
-    [[ "${goto_config:-false}" != "true" ]] && install_singbox_binary "$ver"
+
     install_service
+    install_shortcut
 
-    select_protocols
-    assemble_config
+    # 初始化节点信息文件
+    cat > "$SB_INFO" <<HDR
+==============================================
+  VOLSB — 节点信息
+  安装时间 : $(date '+%Y-%m-%d %H:%M:%S')
+==============================================
+HDR
 
-    step "启动服务"
-    systemctl restart sing-box
+    local mode; mode=$(select_deploy_mode)
+
+    if [[ "$mode" == "2" ]]; then
+        # 线路机模式
+        deploy_relay
+        assemble_relay_check
+    else
+        # 部署机模式
+        ask_connect_addr
+        select_protocols
+        assemble_and_write_config
+        traffic_init_api
+    fi
+
+    step "启动 sing-box 服务"
+    svc_start
     sleep 2
 
-    if systemctl is-active --quiet sing-box; then
+    if svc_active; then
         info "sing-box 运行中 ✔"
     else
-        err "sing-box 启动失败! 日志:"
-        journalctl -u sing-box -n 20 --no-pager; exit 1
+        err "启动失败! 查看日志:"
+        [[ -f "$SB_LOG" ]] && tail -20 "$SB_LOG" || true
+        exit 1
     fi
 
-    show_node_info
+    show_nodes
     echo ""
-    info "安装完成!节点信息已保存: ${BOLD}$SB_INFO_FILE${NC}"
+    info "安装完成!  输入 ${C_BOLD}volsb${NC} 进入管理界面"
+}
+
+# 线路机配置独立写入,不走 assemble_and_write_config
+assemble_relay_check() {
+    "$SB_BIN" check -c "$SB_CONFIG" &>/dev/null || {
+        err "线路机配置校验失败:"
+        "$SB_BIN" check -c "$SB_CONFIG"
+        exit 1
+    }
+    info "线路机配置校验通过"
 }
 
 do_uninstall() {
     require_root
-    ask "确认卸载 sing-box 及所有配置? [y/N]: "; read -r ans
+    ask "确认完全卸载 VOLSB / sing-box? [y/N]: "; read -r ans
     [[ "$ans" =~ ^[Yy]$ ]] || { info "已取消"; return; }
-    systemctl stop sing-box 2>/dev/null || true
-    systemctl disable sing-box 2>/dev/null || true
-    rm -f "$SB_BIN" "$SB_SERVICE"
+    svc_stop 2>/dev/null || true
+    if [[ "$INIT_SYS" == "openrc" ]]; then
+        rc-update del sing-box default &>/dev/null || true
+        rm -f "$SB_OPENRC"
+    else
+        systemctl disable sing-box &>/dev/null || true
+        rm -f "$SB_SYSTEMD"
+        systemctl daemon-reload
+    fi
+    rm -f "$SB_BIN" "$VOLSB_CMD"
     rm -rf "$SB_CONF_DIR" "$SB_LOG_DIR" "$SB_DATA_DIR"
-    systemctl daemon-reload
     info "卸载完成"
 }
 
 do_update() {
-    require_root; [[ -x "$SB_BIN" ]] || die "sing-box 未安装"; detect_arch
+    require_root
+    [[ -x "$SB_BIN" ]] || die "sing-box 未安装"
+    detect_arch
     local cur new
     cur=$("$SB_BIN" version | awk '{print $3}' | head -1)
     new=$(get_latest_version)
     [[ "$cur" == "$new" ]] && { info "已是最新版本 v${cur}"; return; }
-    info "v${cur} → v${new}"
-    install_singbox_binary "$new"
-    systemctl restart sing-box && info "升级完成 ✔"
+    info "升级: v${cur} → v${new}"
+    install_binary "$new"
+    svc_restart && info "升级完成 ✔"
 }
 
-do_add_proto() {
-    require_root; [[ -f "$SB_CONFIG" ]] || die "请先安装 sing-box"
-    select_protocols; assemble_config
-    systemctl restart sing-box && info "配置已更新并重启" || err "重启失败,请查看日志"
-}
+# ════════════════════════════════════════════════════════════
+#  管理界面 (volsb 命令入口)
+# ════════════════════════════════════════════════════════════
 
-show_node_info() {
-    [[ -f "$SB_INFO_FILE" ]] || { warn "节点信息文件不存在"; return; }
-    echo ""; cat "$SB_INFO_FILE"; echo ""
-
-    # 打印每个分享链接的二维码
-    if command -v qrencode &>/dev/null; then
-        while IFS= read -r line; do
-            if [[ "$line" =~ 分享链接 ]]; then
-                local lnk; lnk=$(echo "$line" | sed 's/.*: //' | tr -d ' ')
-                [[ -n "$lnk" && "$lnk" != *"客户端"* ]] && { echo "  扫码导入:"; print_qr "$lnk"; }
-            fi
-        done < "$SB_INFO_FILE"
-    fi
-}
-
-show_status() {
-    echo ""
-    [[ -x "$SB_BIN" ]] && { "$SB_BIN" version; echo ""; }
-    systemctl status sing-box --no-pager -l | head -25
-}
-
-show_log() {
-    [[ -f "$SB_LOG" ]] && tail -f "$SB_LOG" || journalctl -u sing-box -f
-}
-
-edit_config() {
-    require_root; [[ -f "$SB_CONFIG" ]] || die "配置文件不存在"
-    ${EDITOR:-vi} "$SB_CONFIG"
-    if "$SB_BIN" check -c "$SB_CONFIG" &>/dev/null; then
-        systemctl restart sing-box && info "已保存并重启"
-    else
-        err "配置有误,未重启:"; "$SB_BIN" check -c "$SB_CONFIG"
-    fi
-}
-
-# ======================== 主菜单 ========================
 main_menu() {
-    clear
-    echo -e "${BOLD}${CYAN}"
-    cat <<'BANNER'
-  ╔══════════════════════════════════════════════╗
-  ║      sing-box 服务端管理脚本  v2.0.0         ║
-  ╚══════════════════════════════════════════════╝
-BANNER
-    echo -e "${NC}"
-
-    if systemctl is-active --quiet sing-box 2>/dev/null; then
-        echo -e "  运行状态 : ${GREEN}${BOLD}● 运行中${NC}"
-    elif [[ -f "$SB_SERVICE" ]]; then
-        echo -e "  运行状态 : ${RED}${BOLD}● 已停止${NC}"
-    else
-        echo -e "  运行状态 : ${YELLOW}${BOLD}● 未安装${NC}"
+    # 检测 INIT_SYS(管理界面直接调用时需要)
+    if [[ -z "${INIT_SYS:-}" ]]; then
+        [[ -f /etc/alpine-release ]] && INIT_SYS="openrc" || INIT_SYS="systemd"
     fi
-    [[ -x "$SB_BIN" ]] && \
-        echo -e "  当前版本 : $("$SB_BIN" version 2>/dev/null | awk '{print $3}' | head -1)"
-    echo ""
-    hr
-    echo -e "  ${BOLD}安装管理${NC}"
-    echo "   1) 全新安装 / 重新部署"
-    echo "   2) 追加新协议"
-    echo "   3) 升级至最新版本"
-    echo "   4) 卸载"
-    echo ""
-    echo -e "  ${BOLD}服务控制${NC}"
-    echo "   5) 启动        6) 停止        7) 重启"
-    echo "   8) 查看状态"
-    echo ""
-    echo -e "  ${BOLD}配置与日志${NC}"
-    echo "   9) 查看节点信息 & 分享链接"
-    echo "  10) 实时日志 (Ctrl+C 退出)"
-    echo "  11) 编辑配置文件"
-    hr
-    echo "   0) 退出"
-    echo ""
-    ask "请选择 [0-11]: "; read -r opt
 
-    case "$opt" in
-        1)  do_install ;;
-        2)  do_add_proto ;;
-        3)  do_update ;;
-        4)  do_uninstall ;;
-        5)  systemctl start   sing-box && info "已启动" ;;
-        6)  systemctl stop    sing-box && info "已停止" ;;
-        7)  systemctl restart sing-box && info "已重启" ;;
-        8)  show_status ;;
-        9)  show_node_info ;;
-        10) show_log ;;
-        11) edit_config ;;
-        0)  exit 0 ;;
-        *)  warn "无效选项: $opt" ;;
-    esac
+    while true; do
+        clear
+        echo -e "${C_BOLD}${C_CYAN}"
+        cat <<'LOGO'
+  ██╗   ██╗ ██████╗ ██╗     ███████╗██████╗
+  ██║   ██║██╔═══██╗██║     ██╔════╝██╔══██╗
+  ██║   ██║██║   ██║██║     ███████╗██████╔╝
+  ╚██╗ ██╔╝██║   ██║██║     ╚════██║██╔══██╗
+   ╚████╔╝ ╚██████╔╝███████╗███████║██████╔╝
+    ╚═══╝   ╚═════╝ ╚══════╝╚══════╝╚═════╝
+LOGO
+        echo -e "  ${C_DIM}v${VOLSB_VER}  |  $(date '+%Y-%m-%d %H:%M:%S')${NC}"
+        echo -e "${NC}"
 
-    echo ""; ask "按回车返回菜单..."; read -r
-    main_menu
+        # 状态栏
+        if svc_active 2>/dev/null; then
+            echo -e "  状态: ${C_GREEN}${C_BOLD}● 运行中${NC}"
+        elif [[ -f "$SB_SYSTEMD" || -f "$SB_OPENRC" ]]; then
+            echo -e "  状态: ${C_RED}${C_BOLD}● 已停止${NC}"
+        else
+            echo -e "  状态: ${C_YELLOW}${C_BOLD}● 未安装${NC}"
+        fi
+        [[ -x "$SB_BIN" ]] && \
+            echo -e "  版本: ${C_DIM}$("$SB_BIN" version 2>/dev/null | awk '{print $3}' | head -1)${NC}"
+        [[ -f "$SB_LINKS" ]] && \
+            echo -e "  节点: ${C_DIM}$(wc -l < "$SB_LINKS") 条链接${NC}"
+
+        echo ""; hr
+        echo -e "  ${C_BOLD}📦 安装管理${NC}"
+        echo "   1) 全新安装 / 重新部署"
+        echo "   2) 追加新协议"
+        echo "   3) 升级至最新版本"
+        echo "   4) 卸载"
+        echo ""
+        echo -e "  ${C_BOLD}⚙️  服务控制${NC}"
+        echo "   5) 启动    6) 停止    7) 重启    8) 查看状态"
+        echo ""
+        echo -e "  ${C_BOLD}📋 节点与配置${NC}"
+        echo "   9) 查看节点信息 & 分享链接"
+        echo "  10) 重置所有端口"
+        echo "  11) 编辑配置文件"
+        echo ""
+        echo -e "  ${C_BOLD}📊 流量管理${NC}"
+        echo "  12) 查看流量统计"
+        echo "  13) 清空流量日志"
+        echo "  14) 实时日志"
+        hr
+        echo "   0) 退出"
+        echo ""
+        ask "请选择 [0-14]: "; read -r opt
+
+        case "$opt" in
+            1)  do_install ;;
+            2)  require_root; ask_connect_addr; select_protocols; assemble_and_write_config
+                svc_restart && info "配置已更新" ;;
+            3)  do_update ;;
+            4)  do_uninstall ;;
+            5)  require_root; svc_start  && info "已启动" ;;
+            6)  require_root; svc_stop   && info "已停止" ;;
+            7)  require_root; svc_restart && info "已重启" ;;
+            8)  svc_status ;;
+            9)  show_nodes ;;
+            10) reset_ports ;;
+            11) require_root; ${EDITOR:-vi} "$SB_CONFIG"
+                "$SB_BIN" check -c "$SB_CONFIG" &>/dev/null && {
+                    svc_restart && info "配置已保存并重启"
+                } || { err "配置有误,未重启"; "$SB_BIN" check -c "$SB_CONFIG"; } ;;
+            12) show_traffic ;;
+            13) reset_traffic_log ;;
+            14) [[ -f "$SB_LOG" ]] && tail -f "$SB_LOG" || journalctl -u sing-box -f ;;
+            0)  exit 0 ;;
+            *)  warn "无效选项: $opt" ;;
+        esac
+
+        echo ""; ask "按回车继续..."; read -r
+    done
 }
 
-# ======================== 命令行入口 ========================
-case "${1:-menu}" in
-    install|i)         do_install ;;
-    uninstall|remove)  do_uninstall ;;
-    update|upgrade)    do_update ;;
-    add)               do_add_proto ;;
-    start)             systemctl start   sing-box ;;
-    stop)              systemctl stop    sing-box ;;
-    restart|r)         systemctl restart sing-box ;;
-    status|s)          show_status ;;
-    info|node)         show_node_info ;;
-    log|logs)          show_log ;;
-    menu|"")           main_menu ;;
-    -h|--help)
-        cat <<HELP
-用法: $0 [命令]
+# ════════════════════════════════════════════════════════════
+#  命令行入口
+# ════════════════════════════════════════════════════════════
+
+print_help() {
+    cat <<HELP
+VOLSB — sing-box 服务端部署管理脚本 v${VOLSB_VER}
+
+用法:
+  volsb [命令]
 
 命令:
-  install      全新安装并配置协议
-  add          追加协议到现有配置
-  update       升级 sing-box 版本
-  uninstall    完全卸载
-  start        启动服务
-  stop         停止服务
-  restart      重启服务
-  status       查看运行状态
-  info         查看节点信息和分享链接
-  log          实时日志
-  (无参数)     进入交互式菜单
+  (无参数)         进入交互式管理界面
+  install          全新安装
+  relay            以线路机模式安装
+  add              追加协议到现有配置
+  update           升级 sing-box 版本
+  uninstall        完全卸载
+  start            启动服务
+  stop             停止服务
+  restart          重启服务
+  status           查看运行状态
+  info             查看节点信息和分享链接
+  traffic          查看流量统计
+  log              实时日志
+  -h, --help       显示帮助
 
 HELP
-        ;;
-    *) err "未知命令: $1"; "$0" --help ;;
-esac
+}
+
+# relay 模式命令行参数解析
+parse_relay_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --land-addr)   LAND_ADDR="$2";   shift 2 ;;
+            --land-port)   LAND_PORT="$2";   shift 2 ;;
+            --land-pass)   LAND_PASS="$2";   shift 2 ;;
+            --land-method) LAND_METHOD="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+}
+
+main() {
+    local cmd="${1:-menu}"; [[ $# -gt 0 ]] && shift || true
+
+    case "$cmd" in
+        install|i)        do_install ;;
+        relay)
+            require_root; detect_os; detect_arch; install_deps; setup_dirs
+            local ver; ver=$(get_latest_version)
+            install_binary "$ver"; install_service; install_shortcut
+            cat > "$SB_INFO" <<HDR
+==============================================
+  VOLSB 线路机 — 节点信息
+  安装时间 : $(date '+%Y-%m-%d %H:%M:%S')
+==============================================
+HDR
+            parse_relay_args "$@"
+            ask_connect_addr
+            deploy_relay; assemble_relay_check
+            svc_start; sleep 2
+            svc_active && info "线路机运行中 ✔" || { err "启动失败"; exit 1; }
+            show_nodes
+            ;;
+        add)
+            require_root
+            [[ -f "$SB_CONFIG" ]] || die "请先安装"
+            ask_connect_addr; select_protocols; assemble_and_write_config
+            svc_restart && info "已更新并重启" ;;
+        update|upgrade)   do_update ;;
+        uninstall|remove) detect_os; do_uninstall ;;
+        start)            require_root
+                          [[ -f /etc/alpine-release ]] && INIT_SYS="openrc" || INIT_SYS="systemd"
+                          svc_start ;;
+        stop)             require_root
+                          [[ -f /etc/alpine-release ]] && INIT_SYS="openrc" || INIT_SYS="systemd"
+                          svc_stop ;;
+        restart|r)        require_root
+                          [[ -f /etc/alpine-release ]] && INIT_SYS="openrc" || INIT_SYS="systemd"
+                          svc_restart ;;
+        status|s)         [[ -f /etc/alpine-release ]] && INIT_SYS="openrc" || INIT_SYS="systemd"
+                          svc_status ;;
+        info|node)        show_nodes ;;
+        traffic|stats)    show_traffic ;;
+        log|logs)         [[ -f "$SB_LOG" ]] && tail -f "$SB_LOG" \
+                              || journalctl -u sing-box -f ;;
+        menu|"")          main_menu ;;
+        -h|--help|help)   print_help ;;
+        *)                err "未知命令: $cmd"; print_help; exit 1 ;;
+    esac
+}
+
+main "$@"

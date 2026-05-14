@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.0.6
+#   版本   : 1.0.7
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS
@@ -28,7 +28,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.0.6"
+VOLSB_VER="1.0.7"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -411,14 +411,14 @@ deploy_vless_reality() {
     # 先收集所有用户数据，保证 short_id 在 link 和配置里完全一致
     local users_json="["
     local short_ids_json="["
-    local first=true
+    local idx=0
 
     for i in $(seq 1 "$user_count"); do
         local uuid; uuid=$(gen_uuid)
         local short_id; short_id=$(gen_rand_hex 8)
 
-        $first || { users_json+=","; short_ids_json+=","; }
-        first=false
+        [[ $idx -gt 0 ]] && { users_json+=","; short_ids_json+=","; }
+        (( idx++ )) || true
 
         users_json+=$(printf '{"uuid":"%s","flow":"xtls-rprx-vision"}' "$uuid")
         short_ids_json+=$(printf '"%s"' "$short_id")
@@ -485,8 +485,8 @@ deploy_hysteria2() {
     local users_json="["; local first=true
     for i in $(seq 1 "$user_count"); do
         local pwd; pwd=$(gen_rand_str 24)
-        $first || users_json+=","
-        first=false
+        [[ $idx -gt 0 ]] && users_json+=","
+        (( idx++ )) || true
         users_json+="{\"password\":\"${pwd}\"}"
         local ins_param=""; [[ "$insecure" == "true" ]] && ins_param="&insecure=1"
         local link="hysteria2://${pwd}@${CONNECT_ADDR}:${port}/?sni=${masq_domain}${ins_param}#VOLSB-HY2-${i}"
@@ -531,8 +531,8 @@ deploy_vmess_ws() {
     local users_json="["; local first=true
     for i in $(seq 1 "$user_count"); do
         local uuid; uuid=$(gen_uuid)
-        $first || users_json+=","
-        first=false
+        [[ $idx -gt 0 ]] && users_json+=","
+        (( idx++ )) || true
         users_json+="{\"uuid\":\"${uuid}\",\"alterId\":0}"
         local vmjson="{\"v\":\"2\",\"ps\":\"VOLSB-VMess-${i}\",\"add\":\"${CONNECT_ADDR}\",\"port\":\"${port}\",\"id\":\"${uuid}\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"\",\"path\":\"${ws_path}\",\"tls\":\"\"}"
         local b64; b64=$(echo -n "$vmjson" | base64 -w0)
@@ -585,8 +585,8 @@ deploy_trojan() {
     local users_json="["; local first=true
     for i in $(seq 1 "$user_count"); do
         local pwd; pwd=$(gen_rand_str 24)
-        $first || users_json+=","
-        first=false
+        [[ $idx -gt 0 ]] && users_json+=","
+        (( idx++ )) || true
         users_json+="{\"password\":\"${pwd}\"}"
         local ins_param=""; [[ "$insecure" == "true" ]] && ins_param="&allowInsecure=1"
         local link="trojan://${pwd}@${CONNECT_ADDR}:${port}?sni=${masq_domain}${ins_param}#VOLSB-Trojan-${i}"
@@ -633,8 +633,8 @@ deploy_shadowtls() {
     for i in $(seq 1 "$user_count"); do
         local sp; sp=$(gen_rand_str 32)
         local ssp; ssp=$(gen_rand_str 32)
-        $first || { stls_users+=","; ss_users+=","; }
-        first=false
+        [[ $idx -gt 0 ]] && { stls_users+=","; ss_users+=","; }
+        (( idx++ )) || true
         stls_users+="{\"name\":\"user${i}\",\"password\":\"${sp}\"}"
         ss_users+="{\"name\":\"user${i}\",\"password\":\"${ssp}\"}"
         cat >> "$SB_INFO" <<INFO
@@ -716,8 +716,8 @@ deploy_relay() {
     for i in $(seq 1 "$user_count"); do
         local uuid; uuid=$(gen_uuid)
         local sid; sid=$(gen_rand_hex 8)
-        $first || { users_json+=","; short_ids+=","; }
-        first=false
+        [[ $idx -gt 0 ]] && { users_json+=","; short_ids+=","; }
+        (( idx++ )) || true
         users_json+="{\"uuid\":\"${uuid}\",\"flow\":\"xtls-rprx-vision\"}"
         short_ids+="\"${sid}\""
         local link="vless://${uuid}@${CONNECT_ADDR}:${in_port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${sni}&fp=chrome&pbk=${pub_key}&sid=${sid}&type=tcp#VOLSB-Relay-${i}"
@@ -846,6 +846,7 @@ BANNER
 }
 
 assemble_and_write_config() {
+    [[ -x "$SB_BIN" ]] || die "sing-box 未安装，无法生成配置。请先执行安装。"
     ALL_INBOUNDS=()
     ALL_LINKS=()
 

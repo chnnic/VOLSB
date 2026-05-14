@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.1.7
+#   版本   : 1.1.8
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.1.7"
+VOLSB_VER="1.1.8"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -684,19 +684,79 @@ deploy_relay() {
 
     # ── 落地机信息 ──
     banner "落地机 (Shadowsocks) 信息"
-    ask "落地机 IP 或域名: "; read -r LAND_ADDR
-    [[ -z "$LAND_ADDR" ]] && die "落地机地址不能为空"
-    ask "落地机 SS 端口: "; read -r LAND_PORT
-    [[ -z "$LAND_PORT" ]] && die "落地机端口不能为空"
-    ask "落地机 SS 密码: "; read -r LAND_PASS
-    [[ -z "$LAND_PASS" ]] && die "落地机密码不能为空"
-    echo "  加密方式:  1) 2022-blake3-aes-128-gcm (推荐)  2) aes-256-gcm  3) chacha20-ietf-poly1305"
-    ask "选择 [1-3] 默认1: "; read -r enc_choice
-    case "${enc_choice:-1}" in
-        2) LAND_METHOD="aes-256-gcm" ;;
-        3) LAND_METHOD="chacha20-ietf-poly1305" ;;
-        *)  LAND_METHOD="2022-blake3-aes-128-gcm" ;;
-    esac
+    echo ""
+    echo "  输入方式:"
+    echo "   1) 粘贴 SS 链接  (ss://...)"
+    echo "   2) 手动输入"
+    ask "选择 [1/2] 默认1: "; read -r ss_input_mode
+    [[ -z "$ss_input_mode" ]] && ss_input_mode="1"
+
+    if [[ "$ss_input_mode" == "1" ]]; then
+        # ── 解析 SS 链接 ──
+        ask "粘贴 SS 链接: "; read -r ss_link
+        [[ -z "$ss_link" ]] && { err "SS 链接不能为空"; return 1; }
+
+        # 去掉 ss:// 前缀和 #备注 后缀
+        local ss_body; ss_body="${ss_link#ss://}"
+        ss_body="${ss_body%%#*}"
+
+        # 判断格式：SIP002 (method:pwd@host:port) 或 旧格式 (base64@host:port)
+        if echo "$ss_body" | grep -q '@'; then
+            local userinfo hostinfo
+            userinfo="${ss_body%@*}"   # method:pwd 或 base64
+            hostinfo="${ss_body##*@}"  # host:port
+
+            # 提取 host 和 port（支持 IPv6 [::1]:port）
+            if echo "$hostinfo" | grep -q '^\['; then
+                LAND_ADDR="${hostinfo%]*}"; LAND_ADDR="${LAND_ADDR#[}"
+                LAND_PORT="${hostinfo##*]:}"
+            else
+                LAND_ADDR="${hostinfo%:*}"
+                LAND_PORT="${hostinfo##*:}"
+            fi
+
+            # 判断 userinfo 是否是 base64（不含 : 则是 base64）
+            if echo "$userinfo" | grep -q ':'; then
+                # SIP002 明文格式：method:password
+                LAND_METHOD="${userinfo%%:*}"
+                LAND_PASS="${userinfo#*:}"
+            else
+                # 旧格式：base64(method:password)
+                local decoded; decoded=$(echo "$userinfo" | base64 -d 2>/dev/null                     || echo "$userinfo" | base64 -di 2>/dev/null || true)
+                if [[ -n "$decoded" && "$decoded" == *:* ]]; then
+                    LAND_METHOD="${decoded%%:*}"
+                    LAND_PASS="${decoded#*:}"
+                else
+                    err "SS 链接解析失败，请检查格式"; return 1
+                fi
+            fi
+        else
+            err "SS 链接格式不正确，应为 ss://...@host:port"; return 1
+        fi
+
+        # 验证解析结果
+        if [[ -z "$LAND_ADDR" || -z "$LAND_PORT" || -z "$LAND_PASS" || -z "$LAND_METHOD" ]]; then
+            err "SS 链接解析失败: addr=$LAND_ADDR port=$LAND_PORT method=$LAND_METHOD"
+            return 1
+        fi
+        info "解析成功: ${LAND_METHOD} @ ${LAND_ADDR}:${LAND_PORT}"
+
+    else
+        # ── 手动输入 ──
+        ask "落地机 IP 或域名: "; read -r LAND_ADDR
+        [[ -z "$LAND_ADDR" ]] && { err "落地机地址不能为空"; return 1; }
+        ask "落地机 SS 端口: "; read -r LAND_PORT
+        [[ -z "$LAND_PORT" ]] && { err "落地机端口不能为空"; return 1; }
+        ask "落地机 SS 密码: "; read -r LAND_PASS
+        [[ -z "$LAND_PASS" ]] && { err "落地机密码不能为空"; return 1; }
+        echo "  加密方式:  1) 2022-blake3-aes-128-gcm (推荐)  2) aes-256-gcm  3) chacha20-ietf-poly1305"
+        ask "选择 [1-3] 默认1: "; read -r enc_choice
+        case "${enc_choice:-1}" in
+            2) LAND_METHOD="aes-256-gcm" ;;
+            3) LAND_METHOD="chacha20-ietf-poly1305" ;;
+            *)  LAND_METHOD="2022-blake3-aes-128-gcm" ;;
+        esac
+    fi
 
     # ── 线路机入站 (VLESS-Reality) ──
     banner "线路机入站配置"
@@ -846,15 +906,37 @@ BANNER
     [[ ${#SELECTED_PROTOS[@]} -eq 0 ]] && die "未选择任何协议"
 }
 
-assemble_and_write_config() {
-    if [[ ! -x "$SB_BIN" ]]; then
-        err "sing-box 未安装，请先执行菜单选项 1 安装"
-        return 1
+# ────── 写入配置的公共函数 ──────
+_write_config() {
+    # $1 = inbounds JSON array string
+    local inbounds_json="$1"
+    step "写入配置文件"
+    cat > "$SB_CONFIG" <<JSON
+{
+  "log": {
+    "level": "warn",
+    "output": "${SB_LOG}",
+    "timestamp": true
+  },
+  "inbounds": ${inbounds_json},
+  "outbounds": [
+    {"type": "direct", "tag": "direct"},
+    {"type": "block",  "tag": "block"}
+  ],
+  "route": {
+    "final": "direct"
+  }
+}
+JSON
+    if "$SB_BIN" check -c "$SB_CONFIG" 2>/dev/null; then
+        info "配置写入完成，校验通过"
+    else
+        err "配置校验失败:"; "$SB_BIN" check -c "$SB_CONFIG"; return 1
     fi
-    ALL_INBOUNDS=()
-    ALL_LINKS=()
+}
 
-    # 每次组装前重置节点信息文件，避免多次安装累积旧数据
+# ────── 初始化节点信息头 ──────
+_init_info_header() {
     cat > "$SB_INFO" <<INFOHEADER
 ==============================================
   VOLSB — 节点信息
@@ -862,6 +944,16 @@ assemble_and_write_config() {
   服务器   : ${CONNECT_ADDR:-$(get_public_ip)}
 ==============================================
 INFOHEADER
+    : > "$SB_LINKS"   # 清空链接文件
+}
+
+# ────── 全新安装：覆盖所有入站 ──────
+assemble_and_write_config() {
+    if [[ ! -x "$SB_BIN" ]]; then
+        err "sing-box 未安装，请先执行菜单选项 1 安装"; return 1
+    fi
+    ALL_INBOUNDS=(); ALL_LINKS=()
+    _init_info_header
 
     for proto in "${SELECTED_PROTOS[@]}"; do
         case "$proto" in
@@ -873,37 +965,106 @@ INFOHEADER
         esac
     done
 
-    local joined; joined=$(printf '%s\n' "${ALL_INBOUNDS[@]}" | jq -s '.')
-
-    step "写入配置文件"
-    cat > "$SB_CONFIG" <<JSON
-{
-  "log": {
-    "level": "warn",
-    "output": "${SB_LOG}",
-    "timestamp": true
-  },
-  "inbounds": ${joined},
-  "outbounds": [
-    {"type": "direct", "tag": "direct"},
-    {"type": "block",  "tag": "block"}
-  ],
-  "route": {
-    "final": "direct"
-  }
+    local joined; joined=$(printf '%s
+' "${ALL_INBOUNDS[@]}" | jq -s '.')
+    _write_config "$joined" || return 1
+    printf '%s
+' "${ALL_LINKS[@]}" > "$SB_LINKS"
 }
-JSON
 
-    if "$SB_BIN" check -c "$SB_CONFIG" 2>/dev/null; then
-        info "配置写入完成,校验通过"
-    else
-        err "配置校验失败:"
-        "$SB_BIN" check -c "$SB_CONFIG"
-        return 1
+# ────── 追加协议：保留旧入站，合并新入站 ──────
+append_and_write_config() {
+    if [[ ! -x "$SB_BIN" ]]; then
+        err "sing-box 未安装，请先执行菜单选项 1 安装"; return 1
     fi
 
-    # 保存所有分享链接到独立文件
-    printf '%s\n' "${ALL_LINKS[@]}" > "$SB_LINKS"
+    # 读出旧的入站 JSON 数组
+    local old_inbounds_json="[]"
+    if [[ -f "$SB_CONFIG" ]]; then
+        old_inbounds_json=$(jq '.inbounds' "$SB_CONFIG" 2>/dev/null) || old_inbounds_json="[]"
+    fi
+
+    # 询问是否保留旧节点
+    local keep_old=true
+    if [[ "$old_inbounds_json" != "[]" && -n "$old_inbounds_json" ]]; then
+        local old_count; old_count=$(echo "$old_inbounds_json" | jq 'length' 2>/dev/null || echo 0)
+        echo ""
+        echo -e "  ${C_BOLD}检测到已有 ${old_count} 个入站节点:${NC}"
+        echo "$old_inbounds_json" | jq -r             '.[] | "  - \(.type) 端口:\(.listen_port) [\(.tag)]"' 2>/dev/null || true
+        echo ""
+        echo "  选项:"
+        echo "   1) 保留旧节点，追加新节点（推荐）"
+        echo "   2) 清除旧节点，只保留新节点"
+        ask "选择 [1/2] 默认1: "; read -r keep_choice
+        [[ "${keep_choice:-1}" == "2" ]] && keep_old=false
+    fi
+
+    # 生成新入站
+    ALL_INBOUNDS=(); ALL_LINKS=()
+
+    # 若保留旧节点，先把旧入站塞进 ALL_INBOUNDS
+    if $keep_old && [[ "$old_inbounds_json" != "[]" ]]; then
+        # 把旧入站每个元素拆出来加入数组
+        local old_count; old_count=$(echo "$old_inbounds_json" | jq 'length' 2>/dev/null || echo 0)
+        local oi=0
+        while [[ $oi -lt $old_count ]]; do
+            local ib; ib=$(echo "$old_inbounds_json" | jq ".[$oi]" 2>/dev/null)
+            ALL_INBOUNDS+=("$ib")
+            (( oi++ )) || true
+        done
+        # 同时保留旧链接
+        if [[ -f "$SB_LINKS" ]]; then
+            while IFS= read -r lnk; do
+                [[ -n "$lnk" ]] && ALL_LINKS+=("$lnk")
+            done < "$SB_LINKS"
+        fi
+        info "已保留 ${old_count} 个旧入站"
+    fi
+
+    # 重置 SB_INFO 头，但追加模式下先把旧 SB_INFO 内容（节点详情）保留
+    local old_info_body=""
+    if $keep_old && [[ -f "$SB_INFO" ]]; then
+        # 跳过头部（前5行），保留节点详情
+        old_info_body=$(tail -n +6 "$SB_INFO" 2>/dev/null || true)
+    fi
+    _init_info_header
+    [[ -n "$old_info_body" ]] && echo "$old_info_body" >> "$SB_INFO"
+
+    # 部署新协议
+    for proto in "${SELECTED_PROTOS[@]}"; do
+        case "$proto" in
+            vless_reality) deploy_vless_reality ;;
+            hysteria2)     deploy_hysteria2 ;;
+            vmess_ws)      deploy_vmess_ws ;;
+            trojan)        deploy_trojan ;;
+            shadowtls)     deploy_shadowtls ;;
+        esac
+    done
+
+    # 检查 tag 重复（同类型入站 tag 要唯一）
+    local all_tags; all_tags=$(printf '%s
+' "${ALL_INBOUNDS[@]}" | jq -r '.tag // ""' 2>/dev/null)
+    local unique_tags; unique_tags=$(echo "$all_tags" | sort -u | wc -l | tr -d ' ')
+    local total_tags; total_tags=$(echo "$all_tags" | wc -l | tr -d ' ')
+    if [[ "$unique_tags" -lt "$total_tags" ]]; then
+        warn "检测到重复的入站 tag，自动重命名..."
+        local fixed_inbounds=()
+        local tag_count=0
+        for ib in "${ALL_INBOUNDS[@]}"; do
+            local t; t=$(echo "$ib" | jq -r '.tag // ""' 2>/dev/null)
+            local new_tag="${t}-$(( ++tag_count ))"
+            ib=$(echo "$ib" | jq --arg nt "$new_tag" '.tag = $nt' 2>/dev/null)
+            fixed_inbounds+=("$ib")
+        done
+        ALL_INBOUNDS=("${fixed_inbounds[@]}")
+    fi
+
+    local joined; joined=$(printf '%s
+' "${ALL_INBOUNDS[@]}" | jq -s '.')
+    _write_config "$joined" || return 1
+    printf '%s
+' "${ALL_LINKS[@]}" > "$SB_LINKS"
+    info "共 ${#ALL_INBOUNDS[@]} 个入站节点"
 }
 
 # ════════════════════════════════════════════════════════════
@@ -1547,7 +1708,7 @@ LOGO
         case "$opt" in
             1)  do_install || true ;;
             2)  require_root; ask_connect_addr; select_protocols
-                assemble_and_write_config || true
+                append_and_write_config || true
                 svc_restart && info "配置已更新" || true ;;
             3)  do_update_menu || true ;;
             4)  do_uninstall || true ;;
@@ -1642,7 +1803,7 @@ HDR
         add)
             require_root
             [[ -f "$SB_CONFIG" ]] || die "请先安装"
-            ask_connect_addr; select_protocols; assemble_and_write_config
+            ask_connect_addr; select_protocols; append_and_write_config
             svc_restart && info "已更新并重启" ;;
         update|upgrade)   do_update_singbox ;;
         self-update)      do_update_script ;;

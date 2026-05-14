@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.1.3
+#   版本   : 1.1.4
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.1.3"
+VOLSB_VER="1.1.4"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -940,7 +940,6 @@ show_traffic() {
 HDR
     echo -e "${NC}"
 
-    # ── 服务状态 ──
     if svc_active 2>/dev/null; then
         echo -e "  服务状态: ${C_GREEN}● 运行中${NC}"
     else
@@ -948,119 +947,122 @@ HDR
     fi
     echo ""
 
-    # ── 方法1: iptables 按端口统计（最准确，持久化）──
-    if [[ -f "$SB_CONFIG" ]] && command -v iptables &>/dev/null; then
+    # 读取所有入站（一次性，避免循环中多次 jq）
+    if [[ ! -f "$SB_CONFIG" ]]; then
+        warn "配置文件不存在"; return
+    fi
+
+    # jq 输出格式：端口|类型|监听地址，每行一个入站
+    local inbounds_raw
+    inbounds_raw=$(jq -r '.inbounds[] | "\(.listen_port // "")|\(.type // "unknown")|\(.listen // "")"' \
+        "$SB_CONFIG" 2>/dev/null) || inbounds_raw=""
+
+    if [[ -z "$inbounds_raw" ]]; then
+        warn "未找到入站配置"; return
+    fi
+
+    # ── iptables 按端口流量 ──
+    if command -v iptables &>/dev/null; then
         echo -e "  ${C_BOLD}按端口流量统计 (iptables):${NC}"
         hr
-        printf "  ${C_BOLD}%-10s %-20s %-15s %-15s %s${NC}
-" "端口" "协议/类型" "入站流量" "出站流量" "数据包"
+        printf "  ${C_BOLD}%-10s %-22s %-16s %-16s %s${NC}\n" \
+            "端口" "协议/类型" "接收流量" "发送流量" "接收包数"
+        hr
 
-        local inbound_count idx=0
-        inbound_count=$(jq '.inbounds | length' "$SB_CONFIG" 2>/dev/null || echo 0)
-
-        while [[ $idx -lt $inbound_count ]]; do
-            local type port listen
-            type=$(jq  -r ".inbounds[$idx].type         // \"\""  "$SB_CONFIG")
-            port=$(jq  -r ".inbounds[$idx].listen_port  // \"\""  "$SB_CONFIG")
-            listen=$(jq -r ".inbounds[$idx].listen      // \"\""  "$SB_CONFIG")
-            (( idx++ )) || true
-
+        while IFS='|' read -r port type listen; do
             [[ -z "$port" || "$listen" == "127.0.0.1" ]] && continue
 
-            # 读取 iptables 该端口统计（TCP）
-            local rx_bytes rx_pkts tx_bytes tx_pkts
-            rx_bytes=$(iptables -L INPUT  -v -n -x 2>/dev/null                 | awk -v p="$port" '$0 ~ "dpt:"p || $0 ~ "dport "p {sum+=$2} END{print sum+0}' | tr -d '[:space:]')
-            rx_bytes=$(( rx_bytes + 0 )) 2>/dev/null || rx_bytes=0
-            tx_bytes=$(iptables -L OUTPUT -v -n -x 2>/dev/null                 | awk -v p="$port" '$0 ~ "spt:"p || $0 ~ "sport "p {sum+=$2} END{print sum+0}' | tr -d '[:space:]')
-            tx_bytes=$(( tx_bytes + 0 )) 2>/dev/null || tx_bytes=0
-            rx_pkts=$(iptables  -L INPUT  -v -n -x 2>/dev/null                 | awk -v p="$port" '$0 ~ "dpt:"p || $0 ~ "dport "p {sum+=$1} END{print sum+0}' | tr -d '[:space:]')
-            rx_pkts=$(( rx_pkts + 0 )) 2>/dev/null || rx_pkts=0
-            # UDP
-            local rx_udp
-            rx_udp=$(iptables -L INPUT -v -n -x 2>/dev/null                 | awk -v p="$port" '/udp/ && ($0 ~ "dpt:"p) {sum+=$2} END{print sum+0}' | tr -d '[:space:]')
-            rx_udp=$(( rx_udp + 0 )) 2>/dev/null || rx_udp=0
-            rx_bytes=$(( rx_bytes + rx_udp ))
+            # INPUT 链：目标端口 = 该入站端口 → 客户端发来的流量（接收）
+            local rx_b rx_p tx_b rx_udp_b
+            rx_b=$(iptables -L INPUT -v -n -x 2>/dev/null \
+                | awk -v p="$port" 'NR>2 && ($10=="tcp"||$10=="udp") && ($9=="dpt:"p||$0~" dpt:"p" ") {s+=$2} END{print s+0}' \
+                | tr -d '[:space:]')
+            rx_b=$(( ${rx_b:-0} + 0 )) 2>/dev/null || rx_b=0
 
-            printf "  ${C_CYAN}%-10s${NC} %-20s %-15s %-15s %s\n" \
+            rx_p=$(iptables -L INPUT -v -n -x 2>/dev/null \
+                | awk -v p="$port" 'NR>2 && ($9=="dpt:"p||$0~" dpt:"p" ") {s+=$1} END{print s+0}' \
+                | tr -d '[:space:]')
+            rx_p=$(( ${rx_p:-0} + 0 )) 2>/dev/null || rx_p=0
+
+            # OUTPUT 链：源端口 = 该入站端口 → 服务端回包（发送）
+            tx_b=$(iptables -L OUTPUT -v -n -x 2>/dev/null \
+                | awk -v p="$port" 'NR>2 && ($9=="spt:"p||$0~" spt:"p" ") {s+=$2} END{print s+0}' \
+                | tr -d '[:space:]')
+            tx_b=$(( ${tx_b:-0} + 0 )) 2>/dev/null || tx_b=0
+
+            printf "  ${C_CYAN}%-10s${NC} %-22s ${C_GREEN}%-16s${NC} ${C_YELLOW}%-16s${NC} %s\n" \
                 "$port" "$type" \
-                "$(human_bytes ${rx_bytes:-0})" \
-                "$(human_bytes ${tx_bytes:-0})" \
-                "${rx_pkts:-0} pkt"
-        done
+                "$(human_bytes $rx_b)" \
+                "$(human_bytes $tx_b)" \
+                "${rx_p} pkt"
+        done <<< "$inbounds_raw"
         hr
     fi
 
-    # ── 方法2: /proc/net/tcp + /proc/net/udp 当前连接数 ──
-    if [[ -f "$SB_CONFIG" ]]; then
-        echo ""
-        echo -e "  ${C_BOLD}当前连接数 (per 端口):${NC}"
-        hr
-        printf "  ${C_BOLD}%-10s %-20s %s${NC}
-" "端口" "类型" "当前连接数"
+    # ── 当前连接数（/proc/net/tcp + udp）──
+    echo ""
+    echo -e "  ${C_BOLD}当前活跃连接数 (per 端口):${NC}"
+    hr
+    printf "  ${C_BOLD}%-10s %-22s %-12s %-12s %s${NC}\n" \
+        "端口" "类型" "TCP连接" "UDP连接" "合计"
+    hr
 
-        local inbound_count idx=0
-        inbound_count=$(jq '.inbounds | length' "$SB_CONFIG" 2>/dev/null || echo 0)
+    while IFS='|' read -r port type listen; do
+        [[ -z "$port" || "$listen" == "127.0.0.1" ]] && continue
 
-        while [[ $idx -lt $inbound_count ]]; do
-            local type port listen
-            type=$(jq  -r ".inbounds[$idx].type        // \"\""  "$SB_CONFIG")
-            port=$(jq  -r ".inbounds[$idx].listen_port // \"\""  "$SB_CONFIG")
-            listen=$(jq -r ".inbounds[$idx].listen     // \"\""  "$SB_CONFIG")
-            (( idx++ )) || true
+        local hex_port tcp_c udp_c
+        hex_port=$(printf "%04X" "$port" 2>/dev/null) || continue
 
-            [[ -z "$port" || "$listen" == "127.0.0.1" ]] && continue
+        # ESTABLISHED=01, 监听本地端口（第2列含 :HHHH）
+        tcp_c=$(awk -v p=":$hex_port" \
+            'NR>1 && $2~p && $4=="01" {c++} END{print c+0}' \
+            /proc/net/tcp /proc/net/tcp6 2>/dev/null | tr -d '[:space:]')
+        tcp_c=$(( ${tcp_c:-0} + 0 )) 2>/dev/null || tcp_c=0
 
-            # 把端口转十六进制查 /proc/net/tcp 和 tcp6
-            local hex_port; hex_port=$(printf "%04X" "$port")
-            local tcp_conns udp_conns
-            tcp_conns=$(cat /proc/net/tcp  /proc/net/tcp6  2>/dev/null                 | awk -v p=":$hex_port" '$2 ~ p && $4=="01" {c++} END{print c+0}' | tr -d '[:space:]')
-            tcp_conns=$(( tcp_conns + 0 )) 2>/dev/null || tcp_conns=0
-            udp_conns=$(cat /proc/net/udp  /proc/net/udp6  2>/dev/null                 | awk -v p=":$hex_port" '$2 ~ p {c++} END{print c+0}' | tr -d '[:space:]')
-            udp_conns=$(( udp_conns + 0 )) 2>/dev/null || udp_conns=0
-            local total=$(( tcp_conns + udp_conns ))
+        udp_c=$(awk -v p=":$hex_port" \
+            'NR>1 && $2~p {c++} END{print c+0}' \
+            /proc/net/udp /proc/net/udp6 2>/dev/null | tr -d '[:space:]')
+        udp_c=$(( ${udp_c:-0} + 0 )) 2>/dev/null || udp_c=0
 
-            printf "  ${C_CYAN}%-10s${NC} %-20s " "$port" "$type"
-            if [[ $total -gt 0 ]]; then
-                echo -e "${C_GREEN}${total} 个活跃连接${NC} (TCP:${tcp_conns} UDP:${udp_conns})"
-            else
-                echo -e "${C_DIM}0 (无连接)${NC}"
-            fi
-        done
-        hr
-    fi
+        local total=$(( tcp_c + udp_c ))
+        printf "  ${C_CYAN}%-10s${NC} %-22s " "$port" "$type"
+        if [[ $total -gt 0 ]]; then
+            printf "${C_GREEN}%-12s${NC} ${C_GREEN}%-12s${NC} ${C_GREEN}%s${NC}\n" \
+                "$tcp_c" "$udp_c" "$total 个"
+        else
+            printf "${C_DIM}%-12s %-12s %s${NC}\n" "0" "0" "无连接"
+        fi
+    done <<< "$inbounds_raw"
+    hr
 
-    # ── 方法3: 网卡总量 ──
+    # ── 网卡累计流量 ──
     echo ""
     echo -e "  ${C_BOLD}网卡累计流量:${NC}"
-    local iface; iface=$(ip route 2>/dev/null | awk '/default/{print $5; exit}')
+    local iface
+    iface=$(ip route 2>/dev/null | awk '/default/{print $5; exit}')
     if [[ -n "${iface:-}" ]] && [[ -f /proc/net/dev ]]; then
         local rx tx
-        rx=$(awk -v i="${iface}:" '$1==i{print $2}'  /proc/net/dev 2>/dev/null || echo 0)
-        tx=$(awk -v i="${iface}:" '$1==i{print $10}' /proc/net/dev 2>/dev/null || echo 0)
-        printf "  接口 ${C_CYAN}%s${NC} — ↓ 接收: ${C_GREEN}%s${NC}  ↑ 发送: ${C_YELLOW}%s${NC}
-"             "$iface" "$(human_bytes "${rx:-0}")" "$(human_bytes "${tx:-0}")"
-    fi
+        rx=$(awk -v i="${iface}:" '$1==i{print $2}'  /proc/net/dev 2>/dev/null | tr -d '[:space:]')
+        tx=$(awk -v i="${iface}:" '$1==i{print $10}' /proc/net/dev 2>/dev/null | tr -d '[:space:]')
+        rx=$(( ${rx:-0} + 0 )) 2>/dev/null || rx=0
+        tx=$(( ${tx:-0} + 0 )) 2>/dev/null || tx=0
+        printf "  接口 ${C_CYAN}%s${NC} — ↓ 接收: ${C_GREEN}%s${NC}  ↑ 发送: ${C_YELLOW}%s${NC}\n" \
+            "$iface" "$(human_bytes $rx)" "$(human_bytes $tx)"
 
-    # ── 方法4: 实时速率（读两次 /proc/net/dev 取差值）──
-    if [[ -n "${iface:-}" ]] && [[ -f /proc/net/dev ]]; then
+        # 实时速率（采样1秒）
         local r1 t1 r2 t2
-        r1=$(awk -v i="${iface}:" '$1==i{print $2}'  /proc/net/dev 2>/dev/null || echo 0 | tr -d '[:space:]')
-        r1=$(( r1 + 0 )) 2>/dev/null || r1=0
-        t1=$(awk -v i="${iface}:" '$1==i{print $10}' /proc/net/dev 2>/dev/null || echo 0 | tr -d '[:space:]')
-        t1=$(( t1 + 0 )) 2>/dev/null || t1=0
+        r1=$(awk -v i="${iface}:" '$1==i{print $2}'  /proc/net/dev 2>/dev/null | tr -d '[:space:]'); r1=$(( ${r1:-0}+0 )) 2>/dev/null || r1=0
+        t1=$(awk -v i="${iface}:" '$1==i{print $10}' /proc/net/dev 2>/dev/null | tr -d '[:space:]'); t1=$(( ${t1:-0}+0 )) 2>/dev/null || t1=0
         sleep 1
-        r2=$(awk -v i="${iface}:" '$1==i{print $2}'  /proc/net/dev 2>/dev/null || echo 0 | tr -d '[:space:]')
-        r2=$(( r2 + 0 )) 2>/dev/null || r2=0
-        t2=$(awk -v i="${iface}:" '$1==i{print $10}' /proc/net/dev 2>/dev/null || echo 0)
-        local rx_rate=$(( r2 - r1 ))
-        local tx_rate=$(( t2 - t1 ))
-        printf "  实时速率 — ↓ ${C_GREEN}%s/s${NC}  ↑ ${C_YELLOW}%s/s${NC}
-"             "$(human_bytes $rx_rate)" "$(human_bytes $tx_rate)"
+        r2=$(awk -v i="${iface}:" '$1==i{print $2}'  /proc/net/dev 2>/dev/null | tr -d '[:space:]'); r2=$(( ${r2:-0}+0 )) 2>/dev/null || r2=0
+        t2=$(awk -v i="${iface}:" '$1==i{print $10}' /proc/net/dev 2>/dev/null | tr -d '[:space:]'); t2=$(( ${t2:-0}+0 )) 2>/dev/null || t2=0
+        printf "  实时速率 — ↓ ${C_GREEN}%s/s${NC}  ↑ ${C_YELLOW}%s/s${NC}\n" \
+            "$(human_bytes $(( r2 - r1 )))" "$(human_bytes $(( t2 - t1 )))"
     fi
 
-    echo ""
-    hr
+    echo ""; hr
 }
+
 
 reset_traffic_log() {
     ask "确认清空流量日志? [y/N]: "; read -r ans
@@ -1097,33 +1099,23 @@ show_nodes() {
 HDR
     echo -e "${NC}"
 
-    # ── 从 config.json 实时读取入站端口和类型 ──
+    # ── 从 config.json 实时读取入站端口和类型（一次性读取）──
     if [[ -f "$SB_CONFIG" ]]; then
         echo -e "  ${C_BOLD}当前运行入站:${NC}"
         hr
-        local inbound_count
-        inbound_count=$(jq '.inbounds | length' "$SB_CONFIG" 2>/dev/null || echo 0)
-        local idx=0
-        while [[ $idx -lt $inbound_count ]]; do
-            local type tag port
-            type=$(jq -r ".inbounds[$idx].type // \"unknown\"" "$SB_CONFIG")
-            tag=$(jq  -r ".inbounds[$idx].tag  // \"\""        "$SB_CONFIG")
-            port=$(jq -r ".inbounds[$idx].listen_port // \"\""  "$SB_CONFIG")
-            # 监听地址若不是公网，跳过展示（如 ss-backend-in 监听 127.0.0.1）
-            local listen
-            listen=$(jq -r ".inbounds[$idx].listen // \"\""    "$SB_CONFIG")
-            if [[ "$listen" == "127.0.0.1" ]]; then
-                (( idx++ )) || true; continue
-            fi
-            printf "  ${C_BOLD}%-4s${NC} ${C_GREEN}%-20s${NC} 端口: ${C_CYAN}%-8s${NC} 标签: %s
-"                 "$((idx+1)))" "$type" "$port" "$tag"
-            (( idx++ )) || true
-        done
+        local n=0
+        while IFS='|' read -r ib_type ib_port ib_tag ib_listen; do
+            [[ "$ib_listen" == "127.0.0.1" ]] && continue
+            (( n++ )) || true
+            printf "  ${C_BOLD}%-4s${NC} ${C_GREEN}%-20s${NC} 端口: ${C_CYAN}%-8s${NC} 标签: %s\n" \
+                "${n})" "$ib_type" "$ib_port" "$ib_tag"
+        done < <(jq -r '.inbounds[] | [.type//"unknown",.listen_port//"",.tag//"",.listen//""] | join("|")' \
+            "$SB_CONFIG" 2>/dev/null)
+        [[ $n -eq 0 ]] && warn "未读取到入站配置"
         hr
     else
         warn "配置文件不存在，请先安装"
     fi
-
     # ── 展示节点详情 ──
     if [[ -f "$SB_INFO" ]]; then
         echo ""

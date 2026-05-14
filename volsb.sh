@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.0.8
+#   版本   : 1.0.9
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.0.8"
+VOLSB_VER="1.0.9"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -1143,10 +1143,12 @@ do_install() {
     local ver; ver=$(get_latest_version)
     if [[ -x "$SB_BIN" ]]; then
         local cur; cur=$("$SB_BIN" version 2>/dev/null | awk '{print $3}' | head -1)
-        [[ "$cur" == "$ver" ]] && warn "已是最新版本 v${ver}" || {
-            info "当前 v${cur} → 最新 v${ver}"
+        if [[ "$cur" == "$ver" ]]; then
+            warn "sing-box 已是最新版本 v${ver}，跳过下载，继续配置"
+        else
+            info "当前 v${cur} → 最新 v${ver}，升级中..."
             install_binary "$ver"
-        }
+        fi
     else
         install_binary "$ver"
     fi
@@ -1156,6 +1158,7 @@ do_install() {
         err "sing-box 安装失败，请检查网络后重试"
         return 1
     fi
+    info "sing-box 就绪: $("$SB_BIN" version 2>/dev/null | head -1)"
 
     install_service
     install_shortcut

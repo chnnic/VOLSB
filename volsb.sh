@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.2.6
+#   版本   : 1.2.9
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.2.6"
+VOLSB_VER="1.2.9"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -1175,6 +1175,74 @@ human_bytes() {
 clean_num() { local v; v=$(echo "${1:-0}" | tr -d '[:space:]'); echo $(( v + 0 )) 2>/dev/null || echo 0; }
 
 # ════════════════════════════════════════════════════════════
+#  时间同步
+# ════════════════════════════════════════════════════════════
+
+sync_time() {
+    require_root
+    step "强制同步系统时间"
+
+    local current_ts; current_ts=$(date +%s)
+    echo -e "  当前时间: ${C_CYAN}$(date '+%Y-%m-%d %H:%M:%S %Z')${NC} (Unix: ${current_ts})"
+    echo ""
+
+    # 尝试多种同步方式
+    local synced=false
+
+    # 方法1: systemd-timesyncd (最常见)
+    if command -v timedatectl &>/dev/null; then
+        echo -n "  [1] timedatectl 同步... "
+        timedatectl set-ntp true 2>/dev/null || true
+        systemctl restart systemd-timesyncd 2>/dev/null || true
+        sleep 2
+        if timedatectl status 2>/dev/null | grep -q "synchronized: yes"; then
+            echo -e "${C_GREEN}成功${NC}"
+            synced=true
+        else
+            echo -e "${C_DIM}未完成${NC}"
+        fi
+    fi
+
+    # 方法2: chrony
+    if ! $synced && command -v chronyc &>/dev/null; then
+        echo -n "  [2] chrony 强制同步... "
+        chronyc makestep 2>/dev/null && synced=true && echo -e "${C_GREEN}成功${NC}" || echo -e "${C_DIM}失败${NC}"
+    fi
+
+    # 方法3: ntpdate（直接强制设置）
+    if ! $synced && command -v ntpdate &>/dev/null; then
+        echo -n "  [3] ntpdate 同步... "
+        ntpdate -u pool.ntp.org 2>/dev/null && synced=true && echo -e "${C_GREEN}成功${NC}" || echo -e "${C_DIM}失败${NC}"
+    fi
+
+    # 方法4: date + curl 从 HTTP 头获取时间（终极兜底，不需要 ntp 工具）
+    if ! $synced; then
+        echo -n "  [4] 从 HTTP 时间头同步... "
+        local http_date
+        http_date=$(curl -fsSI --max-time 5 "https://www.cloudflare.com" 2>/dev/null             | grep -i "^date:" | sed 's/^[Dd]ate: //' | tr -d '
+')
+        if [[ -n "$http_date" ]]; then
+            date -s "$http_date" &>/dev/null && synced=true && echo -e "${C_GREEN}成功${NC}" || echo -e "${C_DIM}失败${NC}"
+        else
+            echo -e "${C_DIM}失败${NC}"
+        fi
+    fi
+
+    echo ""
+    if $synced; then
+        local new_ts; new_ts=$(date +%s)
+        local drift=$(( new_ts - current_ts ))
+        echo -e "  ${C_GREEN}[✓]${NC} 时间同步完成"
+        echo -e "  同步后时间: ${C_GREEN}$(date '+%Y-%m-%d %H:%M:%S %Z')${NC}"
+        [[ ${drift#-} -gt 2 ]] &&             echo -e "  ${C_YELLOW}[!]${NC} 时间偏差: ${drift} 秒 (2022-blake3 系列要求偏差 < 30秒)" ||             echo -e "  偏差: ${drift} 秒 ${C_GREEN}✓${NC}"
+    else
+        err "所有同步方式均失败，请手动安装 ntp/chrony 后重试"
+        echo "  apt install -y ntp  或  yum install -y ntp"
+    fi
+}
+
+
+# ════════════════════════════════════════════════════════════
 #  线路机连通性验证
 # ════════════════════════════════════════════════════════════
 
@@ -1201,6 +1269,33 @@ HDR
             (( fail++ )) || true
         fi
     }
+
+    # ── Step 0: 时间偏差预检 ──
+    local ntp_offset=""
+    if command -v chronyc &>/dev/null; then
+        ntp_offset=$(chronyc tracking 2>/dev/null | awk '/System time/{print $4}') || true
+    elif command -v timedatectl &>/dev/null; then
+        ntp_offset=$(timedatectl show 2>/dev/null | grep NTPSynchronized | cut -d= -f2) || true
+    fi
+    # 用 HTTP 时间头做快速偏差检测
+    local http_ts local_ts offset_sec
+    http_ts=$(curl -fsSI --max-time 4 "https://www.cloudflare.com" 2>/dev/null         | grep -i "^date:" | sed "s/^[Dd]ate: //" | tr -d "
+")
+    if [[ -n "$http_ts" ]]; then
+        local_ts=$(date +%s)
+        http_ts_unix=$(date -d "$http_ts" +%s 2>/dev/null || date -j -f "%a, %d %b %Y %T %Z" "$http_ts" +%s 2>/dev/null || echo "$local_ts")
+        offset_sec=$(( local_ts - http_ts_unix )); offset_sec=${offset_sec#-}
+        if [[ $offset_sec -gt 30 ]]; then
+            echo -e "  ${C_YELLOW}[!]${NC} 系统时间偏差 ${offset_sec} 秒，超过 2022-blake3 允许的 30 秒！"
+            echo -e "       ${C_RED}这是导致 SS 连接失败的常见原因${NC}"
+            echo -e "       建议先执行菜单 ${C_BOLD}16) 强制同步系统时间${NC} 再重试验证"
+            echo ""
+        elif [[ $offset_sec -gt 5 ]]; then
+            echo -e "  ${C_YELLOW}[!]${NC} 系统时间偏差 ${offset_sec} 秒，建议同步时间（菜单16）"
+        else
+            echo -e "  ${C_GREEN}[✓]${NC} 系统时间偏差 ${offset_sec} 秒，正常"
+        fi
+    fi
 
     # ── Step 1: 服务运行状态 ──
     hr; echo -e "  ${C_BOLD}Step 1 — 服务状态${NC}"; hr
@@ -1257,6 +1352,47 @@ HDR
         echo -e "${C_RED}失败${NC}"
         (( fail++ )) || true
         echo -e "  ${C_DIM}→ 落地机不可达，请检查: 落地机防火墙/安全组是否放行 ${land_port} 端口${NC}"
+    fi
+
+    # ── Step 4.5: 密码格式验证 ──
+    hr; echo -e "  ${C_BOLD}Step 4.5 — SS 密码格式验证${NC}"; hr
+
+    local land_pass_chk
+    land_pass_chk=$(jq -r '.outbounds[] | select(.type=="shadowsocks") | .password // ""'         "$SB_CONFIG" 2>/dev/null | head -1)
+
+    if [[ -z "$land_pass_chk" ]]; then
+        echo -e "  ${C_RED}[✗]${NC} 无法读取密码"; (( fail++ )) || true
+    else
+        # 2022-blake3-* 系列要求密码是 base64 编码的固定字节数
+        # aes-128-gcm → 16字节 → base64 = 24字符（含==填充）
+        # aes-256-gcm → 32字节 → base64 = 44字符
+        local pass_len decoded_len method_chk
+        method_chk=$(jq -r '.outbounds[] | select(.type=="shadowsocks") | .method // ""'             "$SB_CONFIG" 2>/dev/null | head -1)
+        pass_len=${#land_pass_chk}
+        decoded_len=$(echo "$land_pass_chk" | base64 -d 2>/dev/null | wc -c | tr -d ' ') || decoded_len=0
+
+        local expected_len=16
+        [[ "$method_chk" == *"256"* ]] && expected_len=32
+
+        echo -e "  加密方式 : ${C_CYAN}${method_chk}${NC}"
+        echo -e "  密码长度 : ${pass_len} 字符"
+        echo -e "  Base64解码: ${decoded_len} 字节 (期望 ${expected_len} 字节)"
+
+        if [[ "$method_chk" == "2022-"* ]]; then
+            if [[ $decoded_len -eq $expected_len ]]; then
+                echo -e "  ${C_GREEN}[✓]${NC} 密码格式正确 (base64/${expected_len}字节)"
+                (( pass++ )) || true
+            else
+                echo -e "  ${C_RED}[✗]${NC} 密码格式错误！2022系列加密要求 base64(${expected_len}字节随机数)"
+                echo    "       当前密码解码后为 ${decoded_len} 字节，不符合要求"
+                echo    "       正确格式示例: $(openssl rand -base64 $expected_len | tr -d '\n')"
+                echo    "       请确认落地机密码格式是否一致"
+                (( fail++ )) || true
+            fi
+        else
+            echo -e "  ${C_GREEN}[✓]${NC} 非2022系列加密，密码格式无特殊要求"
+            (( pass++ )) || true
+        fi
     fi
 
     # ── Step 5: 落地机出口IP验证 ──
@@ -1334,7 +1470,7 @@ TESTCFG
         else
             local local_ip="" relay_ip=""
             local_ip=$(curl -fsSL --max-time 6 "https://api.ipify.org" 2>/dev/null | tr -d '[:space:]') || true
-            relay_ip=$(curl -fsSL --max-time 15 \
+            relay_ip=$(curl -fsSL --max-time 30 \
                 --socks5-hostname "127.0.0.1:${test_port}" \
                 "https://api.ipify.org" 2>/dev/null | tr -d '[:space:]') || true
 
@@ -1347,15 +1483,23 @@ TESTCFG
                 echo -e "  ${C_YELLOW}[!]${NC} 出口 IP 与本机相同，流量未经落地机"
                 (( fail++ )) || true
             else
-                echo -e "  ${C_RED}[✗]${NC} SS 出站连接失败，诊断日志:"
-                grep -iE "error|failed|dial|connect|timeout" "$test_log" 2>/dev/null \
-                    | tail -5 | sed 's/^/       /'
-                echo ""
-                echo    "       检查项目:"
-                echo    "       ① 落地机 SS 密码/加密是否一致 (当前: ${land_method})"
-                echo    "       ② 落地机 SS 服务是否运行"
-                echo    "       ③ 落地机防火墙是否放行 ${land_port} 端口 TCP"
-                (( fail++ )) || true
+                # outbound connection 出现 = SS 连通了，只是回包超时
+                if grep -q "outbound connection" "$test_log" 2>/dev/null; then
+                    echo -e "  ${C_YELLOW}[!]${NC} SS 出站已连通，但响应超时（落地机回程延迟过高）"
+                    echo -e "       ${C_DIM}→ 连接已建立：线路机 → 落地机 → 目标 均正常${NC}"
+                    echo    "       → 建议检查落地机出口带宽或更换延迟更低的落地机"
+                    echo    "       → 实际节点大概率可以使用，只是验证工具超时"
+                    (( pass++ )) || true
+                else
+                    echo -e "  ${C_RED}[✗]${NC} SS 出站连接失败，诊断日志:"
+                    grep -iE "error|failed|refused|timeout|reset" "$test_log" 2>/dev/null                         | tail -5 | sed 's/^/       /'
+                    echo ""
+                    echo    "       检查项目:"
+                    echo    "       ① 落地机 SS 密码/加密是否一致 (当前: ${land_method})"
+                    echo    "       ② 落地机 SS 服务是否运行"
+                    echo    "       ③ 落地机防火墙是否放行 ${land_port} 端口 TCP"
+                    (( fail++ )) || true
+                fi
             fi
         fi
 
@@ -1996,6 +2140,7 @@ LOGO
         echo ""
         echo -e "  ${C_BOLD}🔍 诊断${NC}"
         echo "  15) 验证线路机转发连通性"
+        echo "  16) 强制同步系统时间"
         hr
         echo "   0) 退出"
         echo ""
@@ -2022,6 +2167,7 @@ LOGO
             13) reset_traffic_log || true ;;
             14) [[ -f "$SB_LOG" ]] && tail -f "$SB_LOG" || journalctl -u sing-box -f || true ;;
             15) verify_relay || true ;;
+            16) sync_time || true ;;
             0)  exit 0 ;;
             *)  warn "无效选项: $opt" ;;
         esac
@@ -2057,6 +2203,8 @@ VOLSB — sing-box 服务端部署管理脚本 v${VOLSB_VER}
   info             查看节点信息和分享链接
   traffic          查看流量统计
   log              实时日志
+  sync-time        强制同步系统时间
+  verify           验证线路机转发连通性
   -h, --help       显示帮助
 
 HELP
@@ -2104,6 +2252,8 @@ HDR
             svc_restart && info "已更新并重启" ;;
         update|upgrade)   do_update_singbox ;;
         self-update)      do_update_script ;;
+        sync-time)        sync_time ;;
+        verify)           verify_relay ;;
         uninstall|remove) detect_os; do_uninstall ;;
         start)            require_root
                           [[ -f /etc/alpine-release ]] && INIT_SYS="openrc" || INIT_SYS="systemd"

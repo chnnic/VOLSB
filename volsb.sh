@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.1.0
+#   版本   : 1.1.1
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.1.0"
+VOLSB_VER="1.1.1"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -874,31 +874,24 @@ assemble_and_write_config() {
     "output": "${SB_LOG}",
     "timestamp": true
   },
-  "dns": {
-    "servers": [
-      {"tag": "remote", "address": "tls://8.8.8.8",              "detour": "direct"},
-      {"tag": "local",  "address": "https://223.5.5.5/dns-query", "detour": "direct"}
-    ],
-    "strategy": "prefer_ipv4"
-  },
   "inbounds": ${joined},
   "outbounds": [
     {"type": "direct", "tag": "direct"},
     {"type": "block",  "tag": "block"}
   ],
   "route": {
-    "rules": [{"geoip": ["private"], "outbound": "block"}],
     "final": "direct"
   }
 }
 JSON
 
-    "$SB_BIN" check -c "$SB_CONFIG" &>/dev/null || {
+    if "$SB_BIN" check -c "$SB_CONFIG" 2>/dev/null; then
+        info "配置写入完成,校验通过"
+    else
         err "配置校验失败:"
         "$SB_BIN" check -c "$SB_CONFIG"
-        exit 1
-    }
-    info "配置写入完成,校验通过"
+        return 1
+    fi
 
     # 保存所有分享链接到独立文件
     printf '%s\n' "${ALL_LINKS[@]}" > "$SB_LINKS"

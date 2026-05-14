@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.0.3
+#   版本   : 1.0.4
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS
@@ -27,7 +27,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.0.3"
+VOLSB_VER="1.0.4"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -1270,61 +1270,76 @@ do_update_script() {
     require_root
     step "更新 VOLSB 脚本"
 
-    # 获取远端版本号
-    local remote_ver
+    # 获取远端版本号 — 用 || true 防止 pipefail 误触发 set -e
+    local remote_ver=""
     info "检查远端版本 ..."
-    remote_ver=$(curl -fsSL --max-time 10 "$VOLSB_REPO" 2>/dev/null \
-        | grep -m1 'VOLSB_VER=' | sed 's/.*VOLSB_VER="\([^"]*\)".*/\1/')
+    local raw_remote
+    raw_remote=$(curl -fsSL --max-time 15 "$VOLSB_REPO" 2>/dev/null) || true
 
-    if [[ -z "$remote_ver" ]]; then
-        die "无法获取远端版本信息,请检查网络或仓库地址:\n  $VOLSB_REPO"
+    if [[ -n "$raw_remote" ]]; then
+        remote_ver=$(echo "$raw_remote" | grep -m1 'VOLSB_VER='             | sed 's/.*VOLSB_VER="\([^"]*\)".*/\1/' 2>/dev/null) || true
     fi
 
+    if [[ -z "$remote_ver" ]]; then
+        err "无法获取远端版本信息"
+        err "请检查网络或仓库地址: $VOLSB_REPO"
+        return 1
+    fi
+
+    info "本地版本: v${VOLSB_VER}  |  远端版本: v${remote_ver}"
+
     if [[ "$remote_ver" == "$VOLSB_VER" ]]; then
-        info "VOLSB 已是最新版本 v${VOLSB_VER}"; return
+        info "VOLSB 已是最新版本 v${VOLSB_VER}"; return 0
     fi
 
     info "发现新版本: v${VOLSB_VER} → v${remote_ver}"
-    ask "确认更新? [Y/n]: "; read -r ans
-    [[ "$ans" =~ ^[Nn]$ ]] && { info "已取消"; return; }
+    ask "确认更新? [Y/n]: "; read -r _ans
+    [[ "$_ans" =~ ^[Nn]$ ]] && { info "已取消"; return 0; }
 
-    # 下载到临时文件,校验后替换
-    local self; self=$(readlink -f "$0")
-    local tmpfile; tmpfile=$(mktemp)
+    # 确定脚本真实路径:
+    # $0 可能是 /usr/local/bin/volsb (wrapper)，需要找到实际脚本
+    local self
+    # 优先用 BASH_SOURCE[0]，它始终指向实际脚本文件
+    self=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null) || self=$(readlink -f "$0")
+    info "脚本路径: $self"
 
-    info "下载新版脚本 ..."
+    local tmpfile; tmpfile=$(mktemp /tmp/volsb_update.XXXXXX)
+
+    step "下载新版脚本"
     if ! curl -fsSL --max-time 60 -o "$tmpfile" "$VOLSB_REPO"; then
         rm -f "$tmpfile"
-        die "下载失败: $VOLSB_REPO"
+        err "下载失败: $VOLSB_REPO"; return 1
     fi
 
-    # 基本完整性校验:确认是 bash 脚本且包含关键标识
-    if ! grep -q "VOLSB_VER=" "$tmpfile" || ! head -1 "$tmpfile" | grep -q "bash"; then
+    # 完整性校验：必须含 VOLSB_VER= 且第一行是 bash shebang
+    local first_line; first_line=$(head -1 "$tmpfile" 2>/dev/null)
+    if ! grep -q "VOLSB_VER=" "$tmpfile" 2>/dev/null         || [[ "$first_line" != *"bash"* ]]; then
         rm -f "$tmpfile"
-        die "下载内容校验失败,中止更新"
+        err "下载内容校验失败,中止更新"; return 1
     fi
 
-    # 备份当前脚本
+    # 备份当前版本
     local backup="${self}.bak.${VOLSB_VER}"
-    cp "$self" "$backup"
-    info "当前版本已备份: $backup"
+    cp "$self" "$backup" && info "已备份至: $backup"
 
-    # 替换脚本
+    # 原子替换：先写临时文件再 mv，避免写到一半进程读取
     chmod +x "$tmpfile"
     mv "$tmpfile" "$self"
+    info "脚本已替换: $self"
 
-    # 同步更新 /usr/local/bin/volsb 快捷命令(重写指向自身)
-    if [[ -f "$VOLSB_CMD" ]]; then
+    # 同步更新 /usr/local/bin/volsb wrapper（重写指向 self）
+    if [[ -f "$VOLSB_CMD" && "$VOLSB_CMD" != "$self" ]]; then
         cat > "$VOLSB_CMD" <<SHORTCUT
 #!/usr/bin/env bash
 exec bash "${self}" "\$@"
 SHORTCUT
         chmod +x "$VOLSB_CMD"
+        info "快捷命令已同步: $VOLSB_CMD"
     fi
 
-    info "VOLSB 已更新至 v${remote_ver} ✔"
-    warn "脚本已重新加载,请重新运行: ${C_BOLD}volsb${NC}"
-    exit 0
+    echo ""
+    info "VOLSB 更新完成: v${VOLSB_VER} → v${remote_ver} ✔"
+    warn "请重新运行: ${C_BOLD}volsb${NC}"
 }
 
 # ────── 统一更新入口(菜单调用) ──────

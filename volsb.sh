@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.0.4
+#   版本   : 1.0.6
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS
@@ -14,6 +14,7 @@ set -euo pipefail
 
 # ──────────────────────── 颜色 & 输出 ────────────────────────
 C_RED='\033[0;31m'; C_GREEN='\033[0;32m'; C_YELLOW='\033[1;33m'
+# shellcheck disable=SC2034
 C_BLUE='\033[0;34m'; C_CYAN='\033[0;36m'; C_MAGENTA='\033[0;35m'
 C_BOLD='\033[1m'; C_DIM='\033[2m'; NC='\033[0m'
 
@@ -27,7 +28,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.0.4"
+VOLSB_VER="1.0.6"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -400,23 +401,27 @@ deploy_vless_reality() {
         [[ -z "$sni" ]] && sni="www.cloudflare.com"
     fi
 
-    # 生成 Reality 密钥对(全局复用)
+    # 生成 Reality 密钥对
     local keypair; keypair=$("$SB_BIN" generate reality-keypair)
     local priv_key; priv_key=$(echo "$keypair" | awk '/PrivateKey/{print $2}')
     local pub_key;  pub_key=$(echo  "$keypair" | awk '/PublicKey/{print $2}')
 
     ask_multi_user_count; local user_count="$USER_COUNT"
+
+    # 先收集所有用户数据，保证 short_id 在 link 和配置里完全一致
     local users_json="["
+    local short_ids_json="["
     local first=true
 
     for i in $(seq 1 "$user_count"); do
         local uuid; uuid=$(gen_uuid)
         local short_id; short_id=$(gen_rand_hex 8)
-        local tag="user${i}"
 
-        $first || users_json+=","
+        $first || { users_json+=","; short_ids_json+=","; }
         first=false
-        users_json+="{\"uuid\":\"${uuid}\",\"flow\":\"xtls-rprx-vision\",\"name\":\"${tag}\"}"
+
+        users_json+=$(printf '{"uuid":"%s","flow":"xtls-rprx-vision"}' "$uuid")
+        short_ids_json+=$(printf '"%s"' "$short_id")
 
         local link="vless://${uuid}@${CONNECT_ADDR}:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${sni}&fp=chrome&pbk=${pub_key}&sid=${short_id}&type=tcp#VOLSB-Reality-${i}"
         ALL_LINKS+=("$link")
@@ -434,31 +439,20 @@ deploy_vless_reality() {
 INFO
     done
     users_json+="]"
+    short_ids_json+="]"
 
-    ALL_INBOUNDS+=("$(cat <<JSON
-{
-  "type": "vless",
-  "tag": "vless-reality-in",
-  "listen": "::",
-  "listen_port": ${port},
-  "users": ${users_json},
-  "tls": {
-    "enabled": true,
-    "server_name": "${sni}",
-    "reality": {
-      "enabled": true,
-      "handshake": {"server": "${sni}", "server_port": 443},
-      "private_key": "${priv_key}",
-      "short_id": [$(
-          # 为每个 short_id 补充到数组(已记录在link里,这里重新生成相同逻辑)
-          ids=(); for _ in $(seq 1 "$user_count"); do ids+=("\"$(gen_rand_hex 8)\""); done
-          IFS=','; echo "${ids[*]}"
-      )]
-    }
-  }
-}
-JSON
-)")
+    local inbound
+    inbound=$(jq -n \
+        --argjson port      "$port" \
+        --argjson users     "$users_json" \
+        --arg     sni       "$sni" \
+        --arg     priv_key  "$priv_key" \
+        --argjson short_ids "$short_ids_json" \
+        '{type:"vless",tag:"vless-reality-in",listen:"::",listen_port:$port,
+           users:$users,tls:{enabled:true,server_name:$sni,
+           reality:{enabled:true,handshake:{server:$sni,server_port:443},
+           private_key:$priv_key,short_id:$short_ids}}}')
+    ALL_INBOUNDS+=("$inbound")
 
     open_port "$port" tcp
     info "✓ VLESS-Reality | 端口:$port | 用户数:$user_count | SNI:$sni"
@@ -509,22 +503,16 @@ INFO
     done
     users_json+="]"
 
-    ALL_INBOUNDS+=("$(cat <<JSON
-{
-  "type": "hysteria2",
-  "tag": "hysteria2-in",
-  "listen": "::",
-  "listen_port": ${port},
-  "users": ${users_json},
-  "tls": {
-    "enabled": true,
-    "alpn": ["h3"],
-    "certificate_path": "${cert_path}",
-    "key_path": "${key_path}"
-  }
-}
-JSON
-)")
+    local inbound
+    inbound=$(jq -n \
+        --argjson port  "$port" \
+        --argjson users "$users_json" \
+        --arg     cert  "$cert_path" \
+        --arg     key   "$key_path" \
+        '{type:"hysteria2",tag:"hysteria2-in",listen:"::",listen_port:$port,
+           users:$users,tls:{enabled:true,alpn:["h3"],
+           certificate_path:$cert,key_path:$key}}')
+    ALL_INBOUNDS+=("$inbound")
 
     open_port "$port" udp
     info "✓ Hysteria2 | 端口:$port (UDP) | 用户数:$user_count"
@@ -561,17 +549,14 @@ INFO
     done
     users_json+="]"
 
-    ALL_INBOUNDS+=("$(cat <<JSON
-{
-  "type": "vmess",
-  "tag": "vmess-ws-in",
-  "listen": "::",
-  "listen_port": ${port},
-  "users": ${users_json},
-  "transport": {"type": "ws", "path": "${ws_path}"}
-}
-JSON
-)")
+    local inbound
+    inbound=$(jq -n \
+        --argjson port  "$port" \
+        --argjson users "$users_json" \
+        --arg     path  "$ws_path" \
+        '{type:"vmess",tag:"vmess-ws-in",listen:"::",listen_port:$port,
+           users:$users,transport:{type:"ws",path:$path}}')
+    ALL_INBOUNDS+=("$inbound")
 
     open_port "$port" tcp
     info "✓ VMess-WS | 端口:$port | 路径:$ws_path | 用户数:$user_count"
@@ -618,21 +603,15 @@ INFO
     done
     users_json+="]"
 
-    ALL_INBOUNDS+=("$(cat <<JSON
-{
-  "type": "trojan",
-  "tag": "trojan-in",
-  "listen": "::",
-  "listen_port": ${port},
-  "users": ${users_json},
-  "tls": {
-    "enabled": true,
-    "certificate_path": "${cert_path}",
-    "key_path": "${key_path}"
-  }
-}
-JSON
-)")
+    local inbound
+    inbound=$(jq -n \
+        --argjson port  "$port" \
+        --argjson users "$users_json" \
+        --arg     cert  "$cert_path" \
+        --arg     key   "$key_path" \
+        '{type:"trojan",tag:"trojan-in",listen:"::",listen_port:$port,
+           users:$users,tls:{enabled:true,certificate_path:$cert,key_path:$key}}')
+    ALL_INBOUNDS+=("$inbound")
 
     open_port "$port" tcp
     info "✓ Trojan | 端口:$port | 用户数:$user_count"
@@ -671,30 +650,22 @@ INFO
     done
     stls_users+="]"; ss_users+="]"
 
-    ALL_INBOUNDS+=("$(cat <<JSON
-{
-  "type": "shadowtls",
-  "tag": "shadowtls-in",
-  "listen": "::",
-  "listen_port": ${stls_port},
-  "version": 3,
-  "users": ${stls_users},
-  "handshake": {"server": "${sni}", "server_port": 443},
-  "detour": "ss-backend-in"
-}
-JSON
-)")
-    ALL_INBOUNDS+=("$(cat <<JSON
-{
-  "type": "shadowsocks",
-  "tag": "ss-backend-in",
-  "listen": "127.0.0.1",
-  "listen_port": ${ss_port},
-  "method": "2022-blake3-aes-128-gcm",
-  "users": ${ss_users}
-}
-JSON
-)")
+    local stls_inbound ss_inbound
+    stls_inbound=$(jq -n \
+        --argjson port  "$stls_port" \
+        --argjson users "$stls_users" \
+        --arg     sni   "$sni" \
+        '{type:"shadowtls",tag:"shadowtls-in",listen:"::",listen_port:$port,
+           version:3,users:$users,handshake:{server:$sni,server_port:443},
+           detour:"ss-backend-in"}')
+    ss_inbound=$(jq -n \
+        --argjson port  "$ss_port" \
+        --argjson users "$ss_users" \
+        '{type:"shadowsocks",tag:"ss-backend-in",listen:"127.0.0.1",
+           listen_port:$port,method:"2022-blake3-aes-128-gcm",users:$users}')
+    ALL_INBOUNDS+=("$stls_inbound")
+    ALL_INBOUNDS+=("$ss_inbound")
+
     open_port "$stls_port" tcp
     info "✓ ShadowTLS v3 | 端口:$stls_port | 用户数:$user_count | SNI:$sni"
 }
@@ -848,7 +819,7 @@ BANNER
     printf "  ${C_BOLD}%-5s${NC} %-30s %-10s %s\n" "0)" "全部协议"                 "-"     "同时部署以上所有"
     hr
     echo ""
-    echo "  支持多选: ${C_CYAN}1 2${NC}  ${C_CYAN}1 2 4${NC}  ${C_CYAN}0${NC}(全部)"
+    echo -e "  支持多选: ${C_CYAN}1 2${NC}  ${C_CYAN}1 2 4${NC}  ${C_CYAN}0${NC}(全部)"
     echo ""
     # 支持环境变量 VOLSB_PROTO 跳过交互
     local raw_input="${VOLSB_PROTO:-}"

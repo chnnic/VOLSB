@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.3.1
+#   版本   : 1.3.2
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.3.1"
+VOLSB_VER="1.3.2"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -1561,6 +1561,15 @@ HDR
     clash_api=$(jq -r '.experimental.clash_api.external_controller // ""' "$SB_CONFIG" 2>/dev/null)
 
     # ── Clash API 实时速率 ──
+    # 若配置里没有 Clash API，自动注入并重启
+    if [[ -z "$clash_api" ]]; then
+        info "检测到未配置 Clash API，自动注入中..."
+        traffic_init_api
+        clash_api=$(jq -r '.experimental.clash_api.external_controller // ""' "$SB_CONFIG" 2>/dev/null)
+        svc_restart 2>/dev/null || true
+        sleep 2
+    fi
+
     if [[ -n "$clash_api" ]] && curl -fsSL --max-time 2 "http://${clash_api}/version" &>/dev/null; then
         echo -e "  ${C_BOLD}实时速率 (Clash API):${NC}"
         hr
@@ -1597,8 +1606,8 @@ HDR
         fi
         hr
     else
-        warn "Clash API 不可用 (${clash_api:-未配置})"
-        echo -e "  ${C_DIM}执行菜单 1 重新安装，或 volsb restart 重启后生效${NC}"
+        warn "Clash API 暂不可用，服务可能刚重启，请稍后再试"
+        echo -e "  ${C_DIM}或执行: volsb restart${NC}"
         hr
     fi
 

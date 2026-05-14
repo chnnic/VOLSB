@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.0.9
+#   版本   : 1.1.0
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.0.9"
+VOLSB_VER="1.1.0"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -483,7 +483,7 @@ deploy_hysteria2() {
     fi
 
     ask_multi_user_count; local user_count="$USER_COUNT"
-    local users_json="["; local first=true
+    local users_json="["; local idx=0
     for i in $(seq 1 "$user_count"); do
         local pwd; pwd=$(gen_rand_str 24)
         [[ $idx -gt 0 ]] && users_json+=","
@@ -529,7 +529,7 @@ deploy_vmess_ws() {
     [[ "${ws_path:0:1}" != "/" ]] && ws_path="/${ws_path}"
 
     ask_multi_user_count; local user_count="$USER_COUNT"
-    local users_json="["; local first=true
+    local users_json="["; local idx=0
     for i in $(seq 1 "$user_count"); do
         local uuid; uuid=$(gen_uuid)
         [[ $idx -gt 0 ]] && users_json+=","
@@ -583,7 +583,7 @@ deploy_trojan() {
     fi
 
     ask_multi_user_count; local user_count="$USER_COUNT"
-    local users_json="["; local first=true
+    local users_json="["; local idx=0
     for i in $(seq 1 "$user_count"); do
         local pwd; pwd=$(gen_rand_str 24)
         [[ $idx -gt 0 ]] && users_json+=","
@@ -629,7 +629,7 @@ deploy_shadowtls() {
 
     local ss_port; ss_port=$(random_port)
     ask_multi_user_count; local user_count="$USER_COUNT"
-    local stls_users="["; local ss_users="["; local first=true
+    local stls_users="["; local ss_users="["; local idx=0
 
     for i in $(seq 1 "$user_count"); do
         local sp; sp=$(gen_rand_str 32)
@@ -712,7 +712,7 @@ deploy_relay() {
     local pub_key;  pub_key=$(echo  "$keypair" | awk '/PublicKey/{print $2}')
 
     ask_multi_user_count; local user_count="$USER_COUNT"
-    local users_json="["; local short_ids="["; local first=true
+    local users_json="["; local short_ids="["; local idx=0
 
     for i in $(seq 1 "$user_count"); do
         local uuid; uuid=$(gen_uuid)

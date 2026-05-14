@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.1.4
+#   版本   : 1.1.5
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.1.4"
+VOLSB_VER="1.1.5"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -904,15 +904,19 @@ JSON
 # sing-box 启用 ClashAPI 后可通过 REST 查询连接/流量
 # 这里用 /proc/net 统计全量入出流量作为轻量实现
 
-TRAFFIC_API_PORT=9090   # Clash兼容API端口,需在config中启用
+SB_STAT_API="127.0.0.1:8080"  # sing-box 统计 API 监听地址
 
 traffic_init_api() {
-    # 将 ClashAPI 追加到配置 (若尚未有)
-    if ! jq -e '.experimental.clash_api' "$SB_CONFIG" &>/dev/null; then
+    # 注入 sing-box v2ray 兼容统计 API（用于按入站/用户统计流量）
+    if ! jq -e '.experimental.v2ray_api' "$SB_CONFIG" &>/dev/null; then
         local tmp; tmp=$(mktemp)
-        jq '. + {"experimental": {"clash_api": {"external_controller": "127.0.0.1:'"$TRAFFIC_API_PORT"'", "external_ui": "", "secret": ""}}}' \
-            "$SB_CONFIG" > "$tmp" && mv "$tmp" "$SB_CONFIG"
-        info "已启用 Clash API (127.0.0.1:${TRAFFIC_API_PORT})"
+        jq '.experimental = (.experimental // {}) + {
+            "v2ray_api": {
+                "listen": "127.0.0.1:8080",
+                "stats": {"enabled": true, "inbounds": true, "outbounds": true, "users": true}
+            }
+        }' "$SB_CONFIG" > "$tmp" && mv "$tmp" "$SB_CONFIG"
+        info "已启用流量统计 API ($SB_STAT_API)"
     fi
 }
 
@@ -944,76 +948,69 @@ HDR
         echo -e "  服务状态: ${C_GREEN}● 运行中${NC}"
     else
         echo -e "  服务状态: ${C_RED}● 已停止${NC}"
+        warn "服务未运行，流量数据不可用"
     fi
     echo ""
 
-    # 读取所有入站（一次性，避免循环中多次 jq）
-    if [[ ! -f "$SB_CONFIG" ]]; then
-        warn "配置文件不存在"; return
+    [[ ! -f "$SB_CONFIG" ]] && { warn "配置文件不存在"; return; }
+
+    # ── 方法1: sing-box v2ray_api 按入站统计（最准确）──
+    local api_ok=false
+    if jq -e '.experimental.v2ray_api' "$SB_CONFIG" &>/dev/null; then
+        local api_addr
+        api_addr=$(jq -r '.experimental.v2ray_api.listen // "127.0.0.1:8080"' "$SB_CONFIG")
+
+        # 调用 grpc 统计（sing-box 1.8+ 支持 HTTP query stats）
+        local stat_url="http://${api_addr}/stats/query?reset=false&pattern="
+        local stat_raw
+        stat_raw=$(curl -fsSL --max-time 3 "$stat_url" 2>/dev/null) || stat_raw=""
+
+        if [[ -n "$stat_raw" ]] && echo "$stat_raw" | jq -e '.stat' &>/dev/null; then
+            api_ok=true
+            echo -e "  ${C_BOLD}按入站/出站流量统计 (sing-box API):${NC}"
+            hr
+            printf "  ${C_BOLD}%-35s %-16s %-16s${NC}\n" "统计项" "上行" "下行"
+            hr
+
+            echo "$stat_raw" | jq -r '.stat[] | "\(.name)|\(.value)"' 2>/dev/null \
+            | while IFS='|' read -r name value; do
+                value=$(( ${value:-0} + 0 )) 2>/dev/null || value=0
+                # 只显示入站（inbound）和用户（user）统计
+                if [[ "$name" == *"inbound>>>"* || "$name" == *"user>>>"* ]]; then
+                    local dir label
+                    if [[ "$name" == *">>>uplink" ]]; then
+                        dir="up"; label="${name/>>>uplink/}"
+                    else
+                        dir="down"; label="${name/>>>downlink/}"
+                    fi
+                    printf "  %-35s" "$label"
+                    [[ "$dir" == "up"   ]] && printf " ${C_YELLOW}%-16s${NC}" "$(human_bytes $value)" || true
+                    [[ "$dir" == "down" ]] && printf " ${C_GREEN}%-16s${NC}\n" "$(human_bytes $value)" || true
+                fi
+            done
+            hr
+        fi
     fi
 
-    # jq 输出格式：端口|类型|监听地址，每行一个入站
-    local inbounds_raw
-    inbounds_raw=$(jq -r '.inbounds[] | "\(.listen_port // "")|\(.type // "unknown")|\(.listen // "")"' \
-        "$SB_CONFIG" 2>/dev/null) || inbounds_raw=""
-
-    if [[ -z "$inbounds_raw" ]]; then
-        warn "未找到入站配置"; return
-    fi
-
-    # ── iptables 按端口流量 ──
-    if command -v iptables &>/dev/null; then
-        echo -e "  ${C_BOLD}按端口流量统计 (iptables):${NC}"
-        hr
-        printf "  ${C_BOLD}%-10s %-22s %-16s %-16s %s${NC}\n" \
-            "端口" "协议/类型" "接收流量" "发送流量" "接收包数"
-        hr
-
-        while IFS='|' read -r port type listen; do
-            [[ -z "$port" || "$listen" == "127.0.0.1" ]] && continue
-
-            # INPUT 链：目标端口 = 该入站端口 → 客户端发来的流量（接收）
-            local rx_b rx_p tx_b rx_udp_b
-            rx_b=$(iptables -L INPUT -v -n -x 2>/dev/null \
-                | awk -v p="$port" 'NR>2 && ($10=="tcp"||$10=="udp") && ($9=="dpt:"p||$0~" dpt:"p" ") {s+=$2} END{print s+0}' \
-                | tr -d '[:space:]')
-            rx_b=$(( ${rx_b:-0} + 0 )) 2>/dev/null || rx_b=0
-
-            rx_p=$(iptables -L INPUT -v -n -x 2>/dev/null \
-                | awk -v p="$port" 'NR>2 && ($9=="dpt:"p||$0~" dpt:"p" ") {s+=$1} END{print s+0}' \
-                | tr -d '[:space:]')
-            rx_p=$(( ${rx_p:-0} + 0 )) 2>/dev/null || rx_p=0
-
-            # OUTPUT 链：源端口 = 该入站端口 → 服务端回包（发送）
-            tx_b=$(iptables -L OUTPUT -v -n -x 2>/dev/null \
-                | awk -v p="$port" 'NR>2 && ($9=="spt:"p||$0~" spt:"p" ") {s+=$2} END{print s+0}' \
-                | tr -d '[:space:]')
-            tx_b=$(( ${tx_b:-0} + 0 )) 2>/dev/null || tx_b=0
-
-            printf "  ${C_CYAN}%-10s${NC} %-22s ${C_GREEN}%-16s${NC} ${C_YELLOW}%-16s${NC} %s\n" \
-                "$port" "$type" \
-                "$(human_bytes $rx_b)" \
-                "$(human_bytes $tx_b)" \
-                "${rx_p} pkt"
-        done <<< "$inbounds_raw"
-        hr
-    fi
-
-    # ── 当前连接数（/proc/net/tcp + udp）──
+    # ── 方法2: 按端口当前连接数（/proc/net/tcp + udp）──
     echo ""
     echo -e "  ${C_BOLD}当前活跃连接数 (per 端口):${NC}"
     hr
     printf "  ${C_BOLD}%-10s %-22s %-12s %-12s %s${NC}\n" \
-        "端口" "类型" "TCP连接" "UDP连接" "合计"
+        "端口" "类型" "TCP" "UDP" "合计"
     hr
 
+    local inbounds_raw
+    inbounds_raw=$(jq -r '.inbounds[] | "\(.listen_port // "")|\(.type // "unknown")|\(.listen // "")"' \
+        "$SB_CONFIG" 2>/dev/null) || inbounds_raw=""
+
+    local any_conn=false
     while IFS='|' read -r port type listen; do
         [[ -z "$port" || "$listen" == "127.0.0.1" ]] && continue
 
         local hex_port tcp_c udp_c
         hex_port=$(printf "%04X" "$port" 2>/dev/null) || continue
 
-        # ESTABLISHED=01, 监听本地端口（第2列含 :HHHH）
         tcp_c=$(awk -v p=":$hex_port" \
             'NR>1 && $2~p && $4=="01" {c++} END{print c+0}' \
             /proc/net/tcp /proc/net/tcp6 2>/dev/null | tr -d '[:space:]')
@@ -1027,37 +1024,41 @@ HDR
         local total=$(( tcp_c + udp_c ))
         printf "  ${C_CYAN}%-10s${NC} %-22s " "$port" "$type"
         if [[ $total -gt 0 ]]; then
-            printf "${C_GREEN}%-12s${NC} ${C_GREEN}%-12s${NC} ${C_GREEN}%s${NC}\n" \
-                "$tcp_c" "$udp_c" "$total 个"
+            printf "${C_GREEN}%-12s %-12s %s${NC}\n" "$tcp_c" "$udp_c" "${total} 个"
+            any_conn=true
         else
-            printf "${C_DIM}%-12s %-12s %s${NC}\n" "0" "0" "无连接"
+            printf "${C_DIM}%-12s %-12s %s${NC}\n" "0" "0" "无"
         fi
     done <<< "$inbounds_raw"
     hr
 
-    # ── 网卡累计流量 ──
+    # ── 方法3: 网卡总量 + 实时速率 ──
     echo ""
-    echo -e "  ${C_BOLD}网卡累计流量:${NC}"
+    echo -e "  ${C_BOLD}网卡流量:${NC}"
     local iface
     iface=$(ip route 2>/dev/null | awk '/default/{print $5; exit}')
     if [[ -n "${iface:-}" ]] && [[ -f /proc/net/dev ]]; then
         local rx tx
-        rx=$(awk -v i="${iface}:" '$1==i{print $2}'  /proc/net/dev 2>/dev/null | tr -d '[:space:]')
-        tx=$(awk -v i="${iface}:" '$1==i{print $10}' /proc/net/dev 2>/dev/null | tr -d '[:space:]')
-        rx=$(( ${rx:-0} + 0 )) 2>/dev/null || rx=0
-        tx=$(( ${tx:-0} + 0 )) 2>/dev/null || tx=0
-        printf "  接口 ${C_CYAN}%s${NC} — ↓ 接收: ${C_GREEN}%s${NC}  ↑ 发送: ${C_YELLOW}%s${NC}\n" \
+        rx=$(awk -v i="${iface}:" '$1==i{print $2}'  /proc/net/dev 2>/dev/null | tr -d '[:space:]'); rx=$(( ${rx:-0}+0 ))
+        tx=$(awk -v i="${iface}:" '$1==i{print $10}' /proc/net/dev 2>/dev/null | tr -d '[:space:]'); tx=$(( ${tx:-0}+0 ))
+        printf "  接口 ${C_CYAN}%s${NC} | 累计 ↓ ${C_GREEN}%s${NC}  ↑ ${C_YELLOW}%s${NC}\n" \
             "$iface" "$(human_bytes $rx)" "$(human_bytes $tx)"
 
-        # 实时速率（采样1秒）
+        # 实时速率（1秒采样）
         local r1 t1 r2 t2
-        r1=$(awk -v i="${iface}:" '$1==i{print $2}'  /proc/net/dev 2>/dev/null | tr -d '[:space:]'); r1=$(( ${r1:-0}+0 )) 2>/dev/null || r1=0
-        t1=$(awk -v i="${iface}:" '$1==i{print $10}' /proc/net/dev 2>/dev/null | tr -d '[:space:]'); t1=$(( ${t1:-0}+0 )) 2>/dev/null || t1=0
+        r1=$(awk -v i="${iface}:" '$1==i{print $2}'  /proc/net/dev 2>/dev/null | tr -d '[:space:]'); r1=$(( ${r1:-0}+0 ))
+        t1=$(awk -v i="${iface}:" '$1==i{print $10}' /proc/net/dev 2>/dev/null | tr -d '[:space:]'); t1=$(( ${t1:-0}+0 ))
         sleep 1
-        r2=$(awk -v i="${iface}:" '$1==i{print $2}'  /proc/net/dev 2>/dev/null | tr -d '[:space:]'); r2=$(( ${r2:-0}+0 )) 2>/dev/null || r2=0
-        t2=$(awk -v i="${iface}:" '$1==i{print $10}' /proc/net/dev 2>/dev/null | tr -d '[:space:]'); t2=$(( ${t2:-0}+0 )) 2>/dev/null || t2=0
-        printf "  实时速率 — ↓ ${C_GREEN}%s/s${NC}  ↑ ${C_YELLOW}%s/s${NC}\n" \
+        r2=$(awk -v i="${iface}:" '$1==i{print $2}'  /proc/net/dev 2>/dev/null | tr -d '[:space:]'); r2=$(( ${r2:-0}+0 ))
+        t2=$(awk -v i="${iface}:" '$1==i{print $10}' /proc/net/dev 2>/dev/null | tr -d '[:space:]'); t2=$(( ${t2:-0}+0 ))
+        printf "  实时速率 | ↓ ${C_GREEN}%s/s${NC}  ↑ ${C_YELLOW}%s/s${NC}\n" \
             "$(human_bytes $(( r2 - r1 )))" "$(human_bytes $(( t2 - t1 )))"
+    fi
+
+    if ! $api_ok; then
+        echo ""
+        warn "按入站流量统计不可用。重新安装或执行以下命令后重启服务可启用:"
+        echo -e "  ${C_DIM}volsb restart${NC}"
     fi
 
     echo ""; hr

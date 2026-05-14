@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.2.1
+#   版本   : 1.2.2
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.2.1"
+VOLSB_VER="1.2.2"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -1174,6 +1174,172 @@ human_bytes() {
 # 清洗数值：去换行空格，转整数，出错返回0
 clean_num() { local v; v=$(echo "${1:-0}" | tr -d '[:space:]'); echo $(( v + 0 )) 2>/dev/null || echo 0; }
 
+# ════════════════════════════════════════════════════════════
+#  线路机连通性验证
+# ════════════════════════════════════════════════════════════
+
+verify_relay() {
+    clear
+    echo -e "${C_BOLD}${C_CYAN}"
+    cat <<'HDR'
+  ╔════════════════════════════════════════════════════╗
+  ║          VOLSB — 线路机连通性验证                  ║
+  ╚════════════════════════════════════════════════════╝
+HDR
+    echo -e "${NC}"
+
+    local pass=0 fail=0
+
+    _chk() {
+        local label="$1" result="$2" expect="$3"
+        if [[ "$result" == *"$expect"* ]]; then
+            echo -e "  ${C_GREEN}[✓]${NC} ${label}"
+            (( pass++ )) || true
+        else
+            echo -e "  ${C_RED}[✗]${NC} ${label}"
+            [[ -n "$result" ]] && echo -e "      ${C_DIM}→ $result${NC}"
+            (( fail++ )) || true
+        fi
+    }
+
+    # ── Step 1: 服务运行状态 ──
+    hr; echo -e "  ${C_BOLD}Step 1 — 服务状态${NC}"; hr
+    if svc_active 2>/dev/null; then
+        echo -e "  ${C_GREEN}[✓]${NC} sing-box 正在运行"; (( pass++ )) || true
+    else
+        echo -e "  ${C_RED}[✗]${NC} sing-box 未运行，请先启动"
+        (( fail++ )) || true
+        echo ""
+        echo "  请执行: volsb start"
+        return
+    fi
+
+    # ── Step 2: 读取配置 ──
+    hr; echo -e "  ${C_BOLD}Step 2 — 配置读取${NC}"; hr
+    if [[ ! -f "$SB_CONFIG" ]]; then
+        echo -e "  ${C_RED}[✗]${NC} 找不到配置文件: $SB_CONFIG"
+        return
+    fi
+
+    # 检查是否是线路机配置（有 ss 出站）
+    local land_addr land_port land_method
+    land_addr=$(jq  -r '.outbounds[] | select(.type=="shadowsocks") | .server // ""' "$SB_CONFIG" 2>/dev/null | head -1)
+    land_port=$(jq  -r '.outbounds[] | select(.type=="shadowsocks") | .server_port // ""' "$SB_CONFIG" 2>/dev/null | head -1)
+    land_method=$(jq -r '.outbounds[] | select(.type=="shadowsocks") | .method // ""' "$SB_CONFIG" 2>/dev/null | head -1)
+    local in_port
+    in_port=$(jq -r '.inbounds[] | select(.type=="vless") | .listen_port // ""' "$SB_CONFIG" 2>/dev/null | head -1)
+
+    if [[ -z "$land_addr" || -z "$land_port" ]]; then
+        echo -e "  ${C_YELLOW}[!]${NC} 当前不是线路机配置（无 Shadowsocks 出站）"
+        echo    "      请先以线路机模式安装: 菜单 1 → 选择模式 2"
+        return
+    fi
+
+    echo -e "  ${C_GREEN}[✓]${NC} 线路机配置已找到"
+    echo -e "       入站端口  : ${C_CYAN}${in_port}${NC}"
+    echo -e "       落地机    : ${C_CYAN}${land_addr}:${land_port}${NC} (${land_method})"
+
+    # ── Step 3: 端口监听检查 ──
+    hr; echo -e "  ${C_BOLD}Step 3 — 端口监听${NC}"; hr
+    if ss -tuln 2>/dev/null | grep -q ":${in_port} "; then
+        echo -e "  ${C_GREEN}[✓]${NC} 入站端口 ${in_port} 正在监听"; (( pass++ )) || true
+    else
+        echo -e "  ${C_RED}[✗]${NC} 入站端口 ${in_port} 未监听"
+        (( fail++ )) || true
+    fi
+
+    # ── Step 4: 落地机 TCP 连通性 ──
+    hr; echo -e "  ${C_BOLD}Step 4 — 落地机 TCP 连通性${NC}"; hr
+    echo -n "  测试 TCP 连接到 ${land_addr}:${land_port} ... "
+    if timeout 5 bash -c "echo >/dev/tcp/${land_addr}/${land_port}" 2>/dev/null; then
+        echo -e "${C_GREEN}成功${NC}"; (( pass++ )) || true
+    else
+        echo -e "${C_RED}失败${NC}"
+        (( fail++ )) || true
+        echo -e "  ${C_DIM}→ 落地机不可达，请检查: 落地机防火墙/安全组是否放行 ${land_port} 端口${NC}"
+    fi
+
+    # ── Step 5: 落地机出口IP验证 ──
+    hr; echo -e "  ${C_BOLD}Step 5 — 出口 IP 验证${NC}"; hr
+    echo    "  通过线路机 sing-box 出站查询真实出口IP..."
+
+    # 在线路机上起一个临时 socks 入站来测试出站是否正常
+    local test_port=19999
+    local test_cfg; test_cfg=$(mktemp /tmp/volsb_test_XXXX.json)
+    cat > "$test_cfg" <<TESTCFG
+{
+  "log": {"level": "error"},
+  "inbounds": [{
+    "type": "socks", "tag": "test-socks-in",
+    "listen": "127.0.0.1", "listen_port": ${test_port}
+  }],
+  "outbounds": [{
+    "type": "shadowsocks", "tag": "ss-land",
+    "server": "${land_addr}", "server_port": ${land_port},
+    "method": "${land_method}",
+    "password": "$(jq -r '.outbounds[] | select(.type=="shadowsocks") | .password // ""' "$SB_CONFIG" 2>/dev/null | head -1)",
+    "network": "tcp"
+  }],
+  "route": {"rules": [{"inbound": ["test-socks-in"], "outbound": "ss-land"}], "final": "ss-land"}
+}
+TESTCFG
+
+    # 启动临时 sing-box 测试实例
+    "$SB_BIN" run -c "$test_cfg" &>/dev/null &
+    local test_pid=$!
+    sleep 2
+
+    local local_ip relay_ip
+    local_ip=$(curl -fsSL --max-time 5 "https://api.ipify.org" 2>/dev/null | tr -d '[:space:]')
+    relay_ip=$(curl -fsSL --max-time 8 --socks5 "127.0.0.1:${test_port}"         "https://api.ipify.org" 2>/dev/null | tr -d '[:space:]')
+
+    kill $test_pid 2>/dev/null; wait $test_pid 2>/dev/null
+    rm -f "$test_cfg"
+
+    if [[ -n "$relay_ip" && "$relay_ip" != "$local_ip" ]]; then
+        echo -e "  ${C_GREEN}[✓]${NC} 转发成功！"
+        echo -e "       本机 IP   : ${C_DIM}${local_ip}${NC}"
+        echo -e "       出口 IP   : ${C_GREEN}${relay_ip}${NC}  ← 落地机出口"
+        (( pass++ )) || true
+    elif [[ -n "$relay_ip" && "$relay_ip" == "$local_ip" ]]; then
+        echo -e "  ${C_YELLOW}[!]${NC} 出口IP与本机相同（${relay_ip}），流量未经落地机"
+        echo -e "       ${C_DIM}可能是 SS 出站直接出去了，检查路由配置${NC}"
+        (( fail++ )) || true
+    else
+        echo -e "  ${C_RED}[✗]${NC} 无法通过线路机获取出口IP"
+        echo -e "       ${C_DIM}→ SS 出站连接失败，请检查落地机密码/加密方式${NC}"
+        (( fail++ )) || true
+    fi
+
+    # ── Step 6: 日志检查 ──
+    hr; echo -e "  ${C_BOLD}Step 6 — 最近错误日志${NC}"; hr
+    local err_lines
+    err_lines=$(journalctl -u sing-box --since "5 minutes ago" --no-pager 2>/dev/null         | grep -iE "error|failed|refused|timeout" | tail -5)
+    if [[ -z "$err_lines" ]]; then
+        echo -e "  ${C_GREEN}[✓]${NC} 最近5分钟无错误日志"; (( pass++ )) || true
+    else
+        echo -e "  ${C_YELLOW}[!]${NC} 发现错误日志:"
+        echo "$err_lines" | sed "s/^/       ${C_DIM}/" | sed "s/$/${NC}/"
+    fi
+
+    # ── 汇总 ──
+    hr
+    echo ""
+    echo -e "  验证完成: ${C_GREEN}通过 ${pass} 项${NC}  ${C_RED}失败 ${fail} 项${NC}"
+    if [[ $fail -eq 0 ]]; then
+        echo -e "  ${C_GREEN}${C_BOLD}✓ 线路机转发工作正常！${NC}"
+    else
+        echo ""
+        echo -e "  ${C_YELLOW}排查建议:${NC}"
+        echo    "   1. 确认落地机防火墙已放行 ${land_port} 端口（TCP）"
+        echo    "   2. 确认落地机 sing-box/ss 服务正在运行"
+        echo    "   3. 检查密码和加密方式是否与落地机一致"
+        echo    "   4. 查看完整日志: volsb log"
+    fi
+    echo ""
+}
+
+
 show_traffic() {
     clear
     echo -e "${C_BOLD}${C_CYAN}"
@@ -1771,6 +1937,9 @@ LOGO
         echo "  12) 查看流量统计"
         echo "  13) 清空流量日志"
         echo "  14) 实时日志"
+        echo ""
+        echo -e "  ${C_BOLD}🔍 诊断${NC}"
+        echo "  15) 验证线路机转发连通性"
         hr
         echo "   0) 退出"
         echo ""
@@ -1796,6 +1965,7 @@ LOGO
             12) show_traffic || true ;;
             13) reset_traffic_log || true ;;
             14) [[ -f "$SB_LOG" ]] && tail -f "$SB_LOG" || journalctl -u sing-box -f || true ;;
+            15) verify_relay || true ;;
             0)  exit 0 ;;
             *)  warn "无效选项: $opt" ;;
         esac

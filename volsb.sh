@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.1.5
+#   版本   : 1.1.6
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.1.5"
+VOLSB_VER="1.1.6"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -1001,7 +1001,7 @@ HDR
     hr
 
     local inbounds_raw
-    inbounds_raw=$(jq -r '.inbounds[] | "\(.listen_port // "")|\(.type // "unknown")|\(.listen // "")"' \
+    inbounds_raw=$(jq -r '.inbounds[] | [(.listen_port//0|tostring), (.type//"unknown"), (.listen//"")]| join("|")' \
         "$SB_CONFIG" 2>/dev/null) || inbounds_raw=""
 
     local any_conn=false
@@ -1110,7 +1110,7 @@ HDR
             (( n++ )) || true
             printf "  ${C_BOLD}%-4s${NC} ${C_GREEN}%-20s${NC} 端口: ${C_CYAN}%-8s${NC} 标签: %s\n" \
                 "${n})" "$ib_type" "$ib_port" "$ib_tag"
-        done < <(jq -r '.inbounds[] | [.type//"unknown",.listen_port//"",.tag//"",.listen//""] | join("|")' \
+        done < <(jq -r '.inbounds[] | [(.type//"unknown"), (.listen_port//""|tostring), (.tag//""), (.listen//"")]  | join("|")' \
             "$SB_CONFIG" 2>/dev/null)
         [[ $n -eq 0 ]] && warn "未读取到入站配置"
         hr

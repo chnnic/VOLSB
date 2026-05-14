@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.1.6
+#   版本   : 1.1.7
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.1.6"
+VOLSB_VER="1.1.7"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -854,6 +854,15 @@ assemble_and_write_config() {
     ALL_INBOUNDS=()
     ALL_LINKS=()
 
+    # 每次组装前重置节点信息文件，避免多次安装累积旧数据
+    cat > "$SB_INFO" <<INFOHEADER
+==============================================
+  VOLSB — 节点信息
+  更新时间 : $(date '+%Y-%m-%d %H:%M:%S')
+  服务器   : ${CONNECT_ADDR:-$(get_public_ip)}
+==============================================
+INFOHEADER
+
     for proto in "${SELECTED_PROTOS[@]}"; do
         case "$proto" in
             vless_reality) deploy_vless_reality ;;
@@ -1001,12 +1010,11 @@ HDR
     hr
 
     local inbounds_raw
-    inbounds_raw=$(jq -r '.inbounds[] | [(.listen_port//0|tostring), (.type//"unknown"), (.listen//"")]| join("|")' \
-        "$SB_CONFIG" 2>/dev/null) || inbounds_raw=""
+    inbounds_raw=$(jq -r         '.inbounds[] | [(.listen_port|if . then tostring else "" end), (.type//"unknown"), (.listen//"")] | join("|")'         "$SB_CONFIG" 2>/dev/null) || inbounds_raw=""
 
     local any_conn=false
     while IFS='|' read -r port type listen; do
-        [[ -z "$port" || "$listen" == "127.0.0.1" ]] && continue
+        [[ -z "$port" || "$port" == "0" || "$listen" == "127.0.0.1" ]] && continue
 
         local hex_port tcp_c udp_c
         hex_port=$(printf "%04X" "$port" 2>/dev/null) || continue
@@ -1117,10 +1125,25 @@ HDR
     else
         warn "配置文件不存在，请先安装"
     fi
-    # ── 展示节点详情 ──
+    # ── 展示节点详情（与当前 config.json 比对，提示陈旧数据）──
     if [[ -f "$SB_INFO" ]]; then
         echo ""
         echo -e "  ${C_BOLD}节点详情:${NC}"
+        # 检查 SB_INFO 里的端口是否和 config.json 一致
+        local config_ports info_ports stale=false
+        config_ports=$(jq -r '.inbounds[].listen_port | tostring' "$SB_CONFIG" 2>/dev/null | tr '\n' ' ')
+        info_ports=$(grep -oP '端口\s*:\s*\K[0-9]+' "$SB_INFO" 2>/dev/null | sort -u | tr '\n' ' ')
+        # 若 SB_INFO 里有 config.json 里不存在的端口，说明有旧数据
+        for p in $info_ports; do
+            if ! echo "$config_ports" | grep -qw "$p"; then
+                stale=true; break
+            fi
+        done
+        if $stale; then
+            warn "节点信息含旧数据（端口 $info_ports 与当前配置 $config_ports 不完全匹配）"
+            warn "建议重新安装以同步节点信息: 菜单选 1"
+            echo ""
+        fi
         cat "$SB_INFO"
     fi
 
@@ -1283,13 +1306,7 @@ do_install() {
     install_service
     install_shortcut
 
-    # 初始化节点信息文件
-    cat > "$SB_INFO" <<HDR
-==============================================
-  VOLSB — 节点信息
-  安装时间 : $(date '+%Y-%m-%d %H:%M:%S')
-==============================================
-HDR
+    # 节点信息文件由 assemble_and_write_config 统一写入，此处无需初始化
 
     select_deploy_mode
 

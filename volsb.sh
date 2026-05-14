@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.2.4
+#   版本   : 1.2.5
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.2.4"
+VOLSB_VER="1.2.5"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -1906,7 +1906,11 @@ SHORTCUT
 
     echo ""
     info "VOLSB 更新完成: v${VOLSB_VER} → v${remote_ver} ✔"
-    warn "请重新运行: ${C_BOLD}volsb${NC}"
+    echo ""
+    info "正在重新加载新版本..."
+    sleep 1
+    # exec 替换当前进程，直接进入新版本菜单，无需用户手动退出重进
+    exec bash "$self" menu
 }
 
 # ────── 统一更新入口(菜单调用) ──────

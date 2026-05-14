@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.2.3
+#   版本   : 1.2.4
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.2.3"
+VOLSB_VER="1.2.4"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -1293,13 +1293,7 @@ HDR
     local test_cfg; test_cfg=$(mktemp /tmp/volsb_test_XXXX.json)
     cat > "$test_cfg" <<TESTCFG
 {
-  "log": {"level": "error"},
-  "dns": {
-    "servers": [
-      {"tag": "google", "address": "8.8.8.8"},
-      {"tag": "cf", "address": "1.1.1.1"}
-    ]
-  },
+  "log": {"level": "warn", "output": "/tmp/volsb_test.log", "timestamp": false},
   "inbounds": [{
     "type": "socks", "tag": "test-socks-in",
     "listen": "127.0.0.1", "listen_port": ${test_port}
@@ -1319,36 +1313,49 @@ HDR
 }
 TESTCFG
 
+
     # 启动临时 sing-box 测试实例
     echo "  启动临时测试实例 (端口 ${test_port}) ..."
-    "$SB_BIN" run -c "$test_cfg" &>/tmp/volsb_test.log &
+    "$SB_BIN" run -c "$test_cfg" >> /tmp/volsb_test.log 2>&1 &
     local test_pid=$!
-    # 等待端口就绪，最多5秒
+
+    # 等待端口就绪，最多6秒
     local waited=0
-    while ! ss -tuln 2>/dev/null | grep -q ":${test_port} " && [[ $waited -lt 5 ]]; do
+    while ! ss -tuln 2>/dev/null | grep -q ":${test_port} " && [[ $waited -lt 6 ]]; do
         sleep 1; (( waited++ )) || true
     done
 
-    local local_ip relay_ip
-    local_ip=$(curl -fsSL --max-time 5 "https://api.ipify.org" 2>/dev/null | tr -d '[:space:]')
-    relay_ip=$(curl -fsSL --max-time 10         --socks5-hostname "127.0.0.1:${test_port}"         "https://api.ipify.org" 2>/dev/null | tr -d '[:space:]')
-
-    kill $test_pid 2>/dev/null; wait $test_pid 2>/dev/null
-    rm -f "$test_cfg" /tmp/volsb_test.log
-
-    if [[ -n "$relay_ip" && "$relay_ip" != "$local_ip" ]]; then
-        echo -e "  ${C_GREEN}[✓]${NC} 转发成功！"
-        echo -e "       本机 IP   : ${C_DIM}${local_ip}${NC}"
-        echo -e "       出口 IP   : ${C_GREEN}${relay_ip}${NC}  ← 落地机出口"
-        (( pass++ )) || true
-    elif [[ -n "$relay_ip" && "$relay_ip" == "$local_ip" ]]; then
-        echo -e "  ${C_YELLOW}[!]${NC} 出口IP与本机相同（${relay_ip}），流量未经落地机"
-        echo -e "       ${C_DIM}可能是 SS 出站直接出去了，检查路由配置${NC}"
+    # 检查实例是否成功启动
+    if ! ss -tuln 2>/dev/null | grep -q ":${test_port} "; then
+        echo -e "  ${C_RED}[✗]${NC} 临时实例启动失败，错误信息:"
+        grep -iE "error|fatal" /tmp/volsb_test.log 2>/dev/null | head -5 | sed "s/^/       /"
         (( fail++ )) || true
+        kill $test_pid 2>/dev/null; wait $test_pid 2>/dev/null
+        rm -f "$test_cfg" /tmp/volsb_test.log
     else
-        echo -e "  ${C_RED}[✗]${NC} 无法通过线路机获取出口IP"
-        echo -e "       ${C_DIM}→ SS 出站连接失败，请检查落地机密码/加密方式${NC}"
-        (( fail++ )) || true
+        local local_ip relay_ip
+        local_ip=$(curl -fsSL --max-time 5 "https://api.ipify.org" 2>/dev/null | tr -d '[:space:]')
+        relay_ip=$(curl -fsSL --max-time 10             --socks5-hostname "127.0.0.1:${test_port}"             "https://api.ipify.org" 2>/dev/null | tr -d '[:space:]')
+
+        kill $test_pid 2>/dev/null; wait $test_pid 2>/dev/null
+        rm -f "$test_cfg" /tmp/volsb_test.log
+
+        if [[ -n "$relay_ip" && "$relay_ip" != "$local_ip" ]]; then
+            echo -e "  ${C_GREEN}[✓]${NC} 转发成功！"
+            echo -e "       本机 IP   : ${C_DIM}${local_ip}${NC}"
+            echo -e "       出口 IP   : ${C_GREEN}${relay_ip}${NC}  ← 落地机出口"
+            (( pass++ )) || true
+        elif [[ -n "$relay_ip" && "$relay_ip" == "$local_ip" ]]; then
+            echo -e "  ${C_YELLOW}[!]${NC} 出口IP与本机相同（${relay_ip}），流量未经落地机"
+            echo -e "       ${C_DIM}检查路由规则，SS出站可能未生效${NC}"
+            (( fail++ )) || true
+        else
+            echo -e "  ${C_RED}[✗]${NC} 无法通过SS出站获取IP，可能原因:"
+            echo    "       - 落地机密码或加密方式不匹配"
+            echo    "       - 落地机服务未运行或端口被封"
+            echo    "       - 网络延迟过高（当前超时10秒）"
+            (( fail++ )) || true
+        fi
     fi
 
     # ── Step 6: 日志检查 ──

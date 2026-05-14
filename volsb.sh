@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.1.1
+#   版本   : 1.1.2
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.1.1"
+VOLSB_VER="1.1.2"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -925,48 +925,122 @@ human_bytes() {
 }
 
 show_traffic() {
-    banner "流量统计"
-    hr
+    clear
+    echo -e "${C_BOLD}${C_CYAN}"
+    cat <<'HDR'
+  ╔════════════════════════════════════════════════════╗
+  ║              VOLSB — 流量统计                      ║
+  ╚════════════════════════════════════════════════════╝
+HDR
+    echo -e "${NC}"
 
-    # 方法1: 通过 Clash API 查询实时连接
-    local api="http://127.0.0.1:${TRAFFIC_API_PORT}"
-    if curl -fsSL --max-time 2 "${api}/version" &>/dev/null; then
-        echo -e "\n  ${C_BOLD}实时流量 (Clash API):${NC}"
-        local traffic; traffic=$(curl -fsSL --max-time 3 "${api}/traffic" 2>/dev/null || echo "")
-        if [[ -n "$traffic" ]]; then
-            local up; up=$(echo "$traffic" | jq -r '.up // 0')
-            local down; down=$(echo "$traffic" | jq -r '.down // 0')
-            printf "  ↑ 上行: %s/s   ↓ 下行: %s/s\n" "$(human_bytes "$up")" "$(human_bytes "$down")"
-        fi
-
-        echo -e "\n  ${C_BOLD}当前活跃连接:${NC}"
-        local conns; conns=$(curl -fsSL --max-time 3 "${api}/connections" 2>/dev/null \
-            | jq -r '.connections[]? | "  \(.metadata.sourceIP):\(.metadata.sourcePort) → \(.metadata.destinationIP):\(.metadata.destinationPort)  [\(.chains[0])]"' \
-            2>/dev/null | head -20)
-        [[ -n "$conns" ]] && echo "$conns" || echo "  (无活跃连接)"
-    fi
-
-    # 方法2: 读取 /proc/net/dev 接口统计
-    echo -e "\n  ${C_BOLD}网卡累计流量:${NC}"
-    local iface; iface=$(ip route 2>/dev/null | awk '/default/{print $5; exit}')
-    if [[ -n "$iface" ]] && [[ -f /proc/net/dev ]]; then
-        local rx tx
-        rx=$(awk -v i="${iface}:" '$1==i{print $2}' /proc/net/dev 2>/dev/null || echo 0)
-        tx=$(awk -v i="${iface}:" '$1==i{print $10}' /proc/net/dev 2>/dev/null || echo 0)
-        printf "  接口: ${C_CYAN}%s${NC}\n" "$iface"
-        printf "  ↓ 总接收: %s\n" "$(human_bytes "${rx:-0}")"
-        printf "  ↑ 总发送: %s\n" "$(human_bytes "${tx:-0}")"
-    fi
-
-    # 方法3: 显示 sing-box 日志最近连接记录
-    echo -e "\n  ${C_BOLD}最近日志记录 (最后20行):${NC}"
-    if [[ -f "$SB_LOG" ]]; then
-        tail -20 "$SB_LOG" | grep -E "accepted|connection|inbound" | \
-            sed 's/^/  /' || echo "  (日志为空)"
+    # ── 服务状态 ──
+    if svc_active 2>/dev/null; then
+        echo -e "  服务状态: ${C_GREEN}● 运行中${NC}"
     else
-        echo "  (日志文件不存在)"
+        echo -e "  服务状态: ${C_RED}● 已停止${NC}"
+    fi
+    echo ""
+
+    # ── 方法1: iptables 按端口统计（最准确，持久化）──
+    if [[ -f "$SB_CONFIG" ]] && command -v iptables &>/dev/null; then
+        echo -e "  ${C_BOLD}按端口流量统计 (iptables):${NC}"
+        hr
+        printf "  ${C_BOLD}%-10s %-20s %-15s %-15s %s${NC}
+" "端口" "协议/类型" "入站流量" "出站流量" "数据包"
+
+        local inbound_count idx=0
+        inbound_count=$(jq '.inbounds | length' "$SB_CONFIG" 2>/dev/null || echo 0)
+
+        while [[ $idx -lt $inbound_count ]]; do
+            local type port listen
+            type=$(jq  -r ".inbounds[$idx].type         // \"\""  "$SB_CONFIG")
+            port=$(jq  -r ".inbounds[$idx].listen_port  // \"\""  "$SB_CONFIG")
+            listen=$(jq -r ".inbounds[$idx].listen      // \"\""  "$SB_CONFIG")
+            (( idx++ )) || true
+
+            [[ -z "$port" || "$listen" == "127.0.0.1" ]] && continue
+
+            # 读取 iptables 该端口统计（TCP）
+            local rx_bytes rx_pkts tx_bytes tx_pkts
+            rx_bytes=$(iptables -L INPUT  -v -n -x 2>/dev/null                 | awk -v p="$port" '$0 ~ "dpt:"p || $0 ~ "dport "p {sum+=$2} END{print sum+0}')
+            tx_bytes=$(iptables -L OUTPUT -v -n -x 2>/dev/null                 | awk -v p="$port" '$0 ~ "spt:"p || $0 ~ "sport "p {sum+=$2} END{print sum+0}')
+            rx_pkts=$(iptables  -L INPUT  -v -n -x 2>/dev/null                 | awk -v p="$port" '$0 ~ "dpt:"p || $0 ~ "dport "p {sum+=$1} END{print sum+0}')
+            # UDP
+            local rx_udp
+            rx_udp=$(iptables -L INPUT -v -n -x 2>/dev/null                 | awk -v p="$port" '/udp/ && ($0 ~ "dpt:"p) {sum+=$2} END{print sum+0}')
+            rx_bytes=$(( rx_bytes + rx_udp ))
+
+            printf "  ${C_CYAN}%-10s${NC} %-20s %-15s %-15s %s
+"                 "$port" "$type"                 "$(human_bytes ${rx_bytes:-0})"                 "$(human_bytes ${tx_bytes:-0})"                 "${rx_pkts:-0} pkt"
+        done
+        hr
     fi
 
+    # ── 方法2: /proc/net/tcp + /proc/net/udp 当前连接数 ──
+    if [[ -f "$SB_CONFIG" ]]; then
+        echo ""
+        echo -e "  ${C_BOLD}当前连接数 (per 端口):${NC}"
+        hr
+        printf "  ${C_BOLD}%-10s %-20s %s${NC}
+" "端口" "类型" "当前连接数"
+
+        local inbound_count idx=0
+        inbound_count=$(jq '.inbounds | length' "$SB_CONFIG" 2>/dev/null || echo 0)
+
+        while [[ $idx -lt $inbound_count ]]; do
+            local type port listen
+            type=$(jq  -r ".inbounds[$idx].type        // \"\""  "$SB_CONFIG")
+            port=$(jq  -r ".inbounds[$idx].listen_port // \"\""  "$SB_CONFIG")
+            listen=$(jq -r ".inbounds[$idx].listen     // \"\""  "$SB_CONFIG")
+            (( idx++ )) || true
+
+            [[ -z "$port" || "$listen" == "127.0.0.1" ]] && continue
+
+            # 把端口转十六进制查 /proc/net/tcp 和 tcp6
+            local hex_port; hex_port=$(printf "%04X" "$port")
+            local tcp_conns udp_conns
+            tcp_conns=$(cat /proc/net/tcp  /proc/net/tcp6  2>/dev/null                 | awk -v p=":$hex_port" '$2 ~ p && $4=="01" {c++} END{print c+0}')
+            udp_conns=$(cat /proc/net/udp  /proc/net/udp6  2>/dev/null                 | awk -v p=":$hex_port" '$2 ~ p {c++} END{print c+0}')
+            local total=$(( tcp_conns + udp_conns ))
+
+            printf "  ${C_CYAN}%-10s${NC} %-20s " "$port" "$type"
+            if [[ $total -gt 0 ]]; then
+                echo -e "${C_GREEN}${total} 个活跃连接${NC} (TCP:${tcp_conns} UDP:${udp_conns})"
+            else
+                echo -e "${C_DIM}0 (无连接)${NC}"
+            fi
+        done
+        hr
+    fi
+
+    # ── 方法3: 网卡总量 ──
+    echo ""
+    echo -e "  ${C_BOLD}网卡累计流量:${NC}"
+    local iface; iface=$(ip route 2>/dev/null | awk '/default/{print $5; exit}')
+    if [[ -n "${iface:-}" ]] && [[ -f /proc/net/dev ]]; then
+        local rx tx
+        rx=$(awk -v i="${iface}:" '$1==i{print $2}'  /proc/net/dev 2>/dev/null || echo 0)
+        tx=$(awk -v i="${iface}:" '$1==i{print $10}' /proc/net/dev 2>/dev/null || echo 0)
+        printf "  接口 ${C_CYAN}%s${NC} — ↓ 接收: ${C_GREEN}%s${NC}  ↑ 发送: ${C_YELLOW}%s${NC}
+"             "$iface" "$(human_bytes "${rx:-0}")" "$(human_bytes "${tx:-0}")"
+    fi
+
+    # ── 方法4: 实时速率（读两次 /proc/net/dev 取差值）──
+    if [[ -n "${iface:-}" ]] && [[ -f /proc/net/dev ]]; then
+        local r1 t1 r2 t2
+        r1=$(awk -v i="${iface}:" '$1==i{print $2}'  /proc/net/dev 2>/dev/null || echo 0)
+        t1=$(awk -v i="${iface}:" '$1==i{print $10}' /proc/net/dev 2>/dev/null || echo 0)
+        sleep 1
+        r2=$(awk -v i="${iface}:" '$1==i{print $2}'  /proc/net/dev 2>/dev/null || echo 0)
+        t2=$(awk -v i="${iface}:" '$1==i{print $10}' /proc/net/dev 2>/dev/null || echo 0)
+        local rx_rate=$(( r2 - r1 ))
+        local tx_rate=$(( t2 - t1 ))
+        printf "  实时速率 — ↓ ${C_GREEN}%s/s${NC}  ↑ ${C_YELLOW}%s/s${NC}
+"             "$(human_bytes $rx_rate)" "$(human_bytes $tx_rate)"
+    fi
+
+    echo ""
     hr
 }
 
@@ -996,9 +1070,6 @@ SHORTCUT
 # ════════════════════════════════════════════════════════════
 
 show_nodes() {
-    if [[ ! -f "$SB_INFO" ]]; then
-        warn "节点信息文件不存在,请先安装"; return
-    fi
     clear
     echo -e "${C_BOLD}${C_CYAN}"
     cat <<'HDR'
@@ -1007,21 +1078,66 @@ show_nodes() {
   ╚════════════════════════════════════════════════════╝
 HDR
     echo -e "${NC}"
-    cat "$SB_INFO"
-    hr
 
-    if [[ -f "$SB_LINKS" ]]; then
-        echo -e "\n${C_BOLD}  所有分享链接:${NC}"
-        local i=0
-        while IFS= read -r link; do
-            (( i++ )) || true
-            echo -e "  ${C_DIM}[$i]${NC} ${C_CYAN}${link}${NC}"
-            print_qr "$link"
-        done < "$SB_LINKS"
+    # ── 从 config.json 实时读取入站端口和类型 ──
+    if [[ -f "$SB_CONFIG" ]]; then
+        echo -e "  ${C_BOLD}当前运行入站:${NC}"
+        hr
+        local inbound_count
+        inbound_count=$(jq '.inbounds | length' "$SB_CONFIG" 2>/dev/null || echo 0)
+        local idx=0
+        while [[ $idx -lt $inbound_count ]]; do
+            local type tag port
+            type=$(jq -r ".inbounds[$idx].type // \"unknown\"" "$SB_CONFIG")
+            tag=$(jq  -r ".inbounds[$idx].tag  // \"\""        "$SB_CONFIG")
+            port=$(jq -r ".inbounds[$idx].listen_port // \"\""  "$SB_CONFIG")
+            # 监听地址若不是公网，跳过展示（如 ss-backend-in 监听 127.0.0.1）
+            local listen
+            listen=$(jq -r ".inbounds[$idx].listen // \"\""    "$SB_CONFIG")
+            if [[ "$listen" == "127.0.0.1" ]]; then
+                (( idx++ )) || true; continue
+            fi
+            printf "  ${C_BOLD}%-4s${NC} ${C_GREEN}%-20s${NC} 端口: ${C_CYAN}%-8s${NC} 标签: %s
+"                 "$((idx+1)))" "$type" "$port" "$tag"
+            (( idx++ )) || true
+        done
+        hr
+    else
+        warn "配置文件不存在，请先安装"
     fi
 
+    # ── 展示节点详情 ──
+    if [[ -f "$SB_INFO" ]]; then
+        echo ""
+        echo -e "  ${C_BOLD}节点详情:${NC}"
+        cat "$SB_INFO"
+    fi
+
+    # ── 展示所有分享链接（带编号和二维码）──
+    if [[ -f "$SB_LINKS" ]] && [[ -s "$SB_LINKS" ]]; then
+        hr
+        echo -e "
+  ${C_BOLD}分享链接:${NC}
+"
+        local i=0
+        while IFS= read -r link; do
+            [[ -z "$link" ]] && continue
+            (( i++ )) || true
+            # 从链接提取协议和名称
+            local proto name
+            proto=$(echo "$link" | cut -d: -f1 | tr '[:lower:]' '[:upper:]')
+            name=$(echo "$link" | grep -oP '(?<=#)[^#]*$' || echo "节点$i")
+            echo -e "  ${C_BOLD}${C_YELLOW}[$i] ${proto} — ${name}${NC}"
+            echo -e "  ${C_DIM}${link}${NC}"
+            echo ""
+            print_qr "$link"
+        done < "$SB_LINKS"
+        echo -e "  共 ${C_BOLD}${i}${NC} 条链接，已保存: ${C_DIM}$SB_LINKS${NC}"
+    else
+        echo ""
+        warn "暂无分享链接，请先完成安装配置"
+    fi
     echo ""
-    info "节点文件: $SB_INFO | 链接文件: $SB_LINKS"
 }
 
 # ════════════════════════════════════════════════════════════

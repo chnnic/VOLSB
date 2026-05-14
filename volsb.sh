@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.2.2
+#   版本   : 1.2.3
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.2.2"
+VOLSB_VER="1.2.3"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -1264,37 +1264,77 @@ HDR
     echo    "  通过线路机 sing-box 出站查询真实出口IP..."
 
     # 在线路机上起一个临时 socks 入站来测试出站是否正常
+    # 若 land_addr 是域名，先解析成 IP（避免临时实例 DNS 问题）
+    local land_ip="$land_addr"
+    if ! echo "$land_addr" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+        echo -n "  解析域名 ${land_addr} ... "
+        local resolved
+        resolved=$(getent hosts "$land_addr" 2>/dev/null | awk '{print $1; exit}')
+        [[ -z "$resolved" ]] &&             resolved=$(nslookup "$land_addr" 2>/dev/null | awk '/^Address:/{print $2}' | grep -v '#' | head -1)
+        [[ -z "$resolved" ]] &&             resolved=$(host "$land_addr" 2>/dev/null | awk '/has address/{print $4; exit}')
+        if [[ -n "$resolved" ]]; then
+            land_ip="$resolved"
+            echo -e "${C_GREEN}${land_ip}${NC}"
+        else
+            echo -e "${C_YELLOW}失败，使用域名直接连接${NC}"
+        fi
+    fi
+
+    # 获取落地机密码
+    local land_pass
+    land_pass=$(jq -r '.outbounds[] | select(.type=="shadowsocks") | .password // ""'         "$SB_CONFIG" 2>/dev/null | head -1)
+
     local test_port=19999
+    # 确保测试端口没被占用
+    while ss -tuln 2>/dev/null | grep -q ":${test_port} "; do
+        (( test_port++ )) || true
+    done
+
     local test_cfg; test_cfg=$(mktemp /tmp/volsb_test_XXXX.json)
     cat > "$test_cfg" <<TESTCFG
 {
   "log": {"level": "error"},
+  "dns": {
+    "servers": [
+      {"tag": "google", "address": "8.8.8.8"},
+      {"tag": "cf", "address": "1.1.1.1"}
+    ]
+  },
   "inbounds": [{
     "type": "socks", "tag": "test-socks-in",
     "listen": "127.0.0.1", "listen_port": ${test_port}
   }],
   "outbounds": [{
     "type": "shadowsocks", "tag": "ss-land",
-    "server": "${land_addr}", "server_port": ${land_port},
+    "server": "${land_ip}",
+    "server_port": ${land_port},
     "method": "${land_method}",
-    "password": "$(jq -r '.outbounds[] | select(.type=="shadowsocks") | .password // ""' "$SB_CONFIG" 2>/dev/null | head -1)",
+    "password": "${land_pass}",
     "network": "tcp"
   }],
-  "route": {"rules": [{"inbound": ["test-socks-in"], "outbound": "ss-land"}], "final": "ss-land"}
+  "route": {
+    "rules": [{"inbound": ["test-socks-in"], "outbound": "ss-land"}],
+    "final": "ss-land"
+  }
 }
 TESTCFG
 
     # 启动临时 sing-box 测试实例
-    "$SB_BIN" run -c "$test_cfg" &>/dev/null &
+    echo "  启动临时测试实例 (端口 ${test_port}) ..."
+    "$SB_BIN" run -c "$test_cfg" &>/tmp/volsb_test.log &
     local test_pid=$!
-    sleep 2
+    # 等待端口就绪，最多5秒
+    local waited=0
+    while ! ss -tuln 2>/dev/null | grep -q ":${test_port} " && [[ $waited -lt 5 ]]; do
+        sleep 1; (( waited++ )) || true
+    done
 
     local local_ip relay_ip
     local_ip=$(curl -fsSL --max-time 5 "https://api.ipify.org" 2>/dev/null | tr -d '[:space:]')
-    relay_ip=$(curl -fsSL --max-time 8 --socks5 "127.0.0.1:${test_port}"         "https://api.ipify.org" 2>/dev/null | tr -d '[:space:]')
+    relay_ip=$(curl -fsSL --max-time 10         --socks5-hostname "127.0.0.1:${test_port}"         "https://api.ipify.org" 2>/dev/null | tr -d '[:space:]')
 
     kill $test_pid 2>/dev/null; wait $test_pid 2>/dev/null
-    rm -f "$test_cfg"
+    rm -f "$test_cfg" /tmp/volsb_test.log
 
     if [[ -n "$relay_ip" && "$relay_ip" != "$local_ip" ]]; then
         echo -e "  ${C_GREEN}[✓]${NC} 转发成功！"

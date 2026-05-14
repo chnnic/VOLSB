@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.1.8
+#   版本   : 1.2.1
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.1.8"
+VOLSB_VER="1.2.1"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -350,15 +350,14 @@ ask_connect_addr() {
     # 支持环境变量 VOLSB_IP 跳过交互
     if [[ -n "${VOLSB_IP:-}" ]]; then
         CONNECT_ADDR="$VOLSB_IP"
-        info "连接地址 (环境变量): $CONNECT_ADDR"
-        return
+        info "连接地址 (环境变量): $CONNECT_ADDR"; return
     fi
 
     local auto_ip; auto_ip=$(get_public_ip)
     echo ""
-    echo "  节点链接中使用的连接地址:"
-    echo "  ① 自动检测公网IP: ${C_CYAN}${auto_ip:-检测失败}${NC}"
-    echo "  ② 手动输入 IP 或 DDNS 域名"
+    echo -e "  ${C_BOLD}客户端连接地址${NC}（填入客户端的服务器地址）:"
+    echo -e "  ① 自动检测本机公网IP: ${C_CYAN}${auto_ip:-检测失败}${NC}"
+    echo    "  ② 手动输入（如有域名/DDNS 可在此填入）"
     ask "选择 [1/2] 默认1: "; read -r opt
     if [[ "$opt" == "2" ]]; then
         ask "输入 IP 或域名: "; read -r CONNECT_ADDR
@@ -367,6 +366,29 @@ ask_connect_addr() {
         CONNECT_ADDR="${auto_ip:-127.0.0.1}"
     fi
     info "连接地址: $CONNECT_ADDR"
+}
+
+# ────── 线路机专用:连接IP/域名（提示更明确）──────
+ask_relay_connect_addr() {
+    if [[ -n "${VOLSB_IP:-}" ]]; then
+        CONNECT_ADDR="$VOLSB_IP"
+        info "线路机连接地址 (环境变量): $CONNECT_ADDR"; return
+    fi
+
+    local auto_ip; auto_ip=$(get_public_ip)
+    echo ""
+    echo -e "  ${C_BOLD}线路机（本机）对外连接地址${NC}"
+    echo    "  客户端将连接此地址，线路机再转发到落地机"
+    echo -e "  ① 自动检测本机公网IP: ${C_CYAN}${auto_ip:-检测失败}${NC}"
+    echo    "  ② 手动输入（如有域名/DDNS）"
+    ask "选择 [1/2] 默认1: "; read -r opt
+    if [[ "$opt" == "2" ]]; then
+        ask "输入线路机 IP 或域名: "; read -r CONNECT_ADDR
+        [[ -z "$CONNECT_ADDR" ]] && CONNECT_ADDR="${auto_ip:-127.0.0.1}"
+    else
+        CONNECT_ADDR="${auto_ip:-127.0.0.1}"
+    fi
+    info "线路机连接地址: $CONNECT_ADDR"
 }
 
 # ────── 多用户输入 ──────
@@ -671,6 +693,52 @@ INFO
     info "✓ ShadowTLS v3 | 端口:$stls_port | 用户数:$user_count | SNI:$sni"
 }
 
+# ────── SS 链接解析（供线路机模式调用）──────
+# 解析结果写入 LAND_ADDR LAND_PORT LAND_METHOD LAND_PASS
+_parse_ss_link() {
+    local ss_link="$1"
+    local ss_body; ss_body="${ss_link#ss://}"
+    ss_body="${ss_body%%#*}"   # 去掉 #备注
+
+    if ! echo "$ss_body" | grep -q '@'; then
+        err "SS 链接格式不正确，应为 ss://...@host:port"; return 1
+    fi
+
+    local userinfo hostinfo
+    userinfo="${ss_body%@*}"    # method:pwd 或 base64
+    hostinfo="${ss_body##*@}"   # host:port
+
+    # 提取 host 和 port（支持 IPv6 [::1]:port）
+    if echo "$hostinfo" | grep -q '^\['; then
+        LAND_ADDR="${hostinfo%]*}"; LAND_ADDR="${LAND_ADDR#[}"
+        LAND_PORT="${hostinfo##*]:}"
+    else
+        LAND_ADDR="${hostinfo%:*}"
+        LAND_PORT="${hostinfo##*:}"
+    fi
+
+    # userinfo 含 : 则是明文 method:password，否则是 base64
+    if echo "$userinfo" | grep -q ':'; then
+        LAND_METHOD="${userinfo%%:*}"
+        LAND_PASS="${userinfo#*:}"
+    else
+        local decoded
+        decoded=$(echo "$userinfo" | base64 -d 2>/dev/null || true)
+        if [[ -n "$decoded" && "$decoded" == *:* ]]; then
+            LAND_METHOD="${decoded%%:*}"
+            LAND_PASS="${decoded#*:}"
+        else
+            err "SS 链接 base64 解析失败，请检查链接"; return 1
+        fi
+    fi
+
+    if [[ -z "$LAND_ADDR" || -z "$LAND_PORT" || -z "$LAND_METHOD" || -z "$LAND_PASS" ]]; then
+        err "SS 链接解析失败: addr=${LAND_ADDR} port=${LAND_PORT} method=${LAND_METHOD}"
+        return 1
+    fi
+    info "解析成功: ${LAND_METHOD} @ ${LAND_ADDR}:${LAND_PORT}"
+}
+
 # ════════════════════════════════════════════════════════════
 #  线路机 (中转机) 模式
 #  原理: VLESS-Reality 入站 → Shadowsocks 出站 → 落地机
@@ -682,65 +750,46 @@ deploy_relay() {
     warn "线路机模式: 本机接收 VLESS-Reality 流量,转发至落地机 Shadowsocks 节点"
     echo ""
 
+    # 初始化节点信息文件
+    cat > "$SB_INFO" <<INFOHEADER
+==============================================
+  VOLSB — 线路机节点信息
+  更新时间 : $(date '+%Y-%m-%d %H:%M:%S')
+==============================================
+INFOHEADER
+    : > "$SB_LINKS"
+
     # ── 落地机信息 ──
     banner "落地机 (Shadowsocks) 信息"
     echo ""
     echo "  输入方式:"
     echo "   1) 粘贴 SS 链接  (ss://...)"
     echo "   2) 手动输入"
-    ask "选择 [1/2] 默认1: "; read -r ss_input_mode
-    [[ -z "$ss_input_mode" ]] && ss_input_mode="1"
+    echo ""
 
-    if [[ "$ss_input_mode" == "1" ]]; then
-        # ── 解析 SS 链接 ──
-        ask "粘贴 SS 链接: "; read -r ss_link
-        [[ -z "$ss_link" ]] && { err "SS 链接不能为空"; return 1; }
+    # 循环直到得到合法输入
+    local ss_link=""
+    while true; do
+        ask "选择 [1/2]，或直接粘贴 SS 链接: "; read -r ss_input_raw
+        [[ -z "$ss_input_raw" ]] && ss_input_raw="1"
 
-        # 去掉 ss:// 前缀和 #备注 后缀
-        local ss_body; ss_body="${ss_link#ss://}"
-        ss_body="${ss_body%%#*}"
-
-        # 判断格式：SIP002 (method:pwd@host:port) 或 旧格式 (base64@host:port)
-        if echo "$ss_body" | grep -q '@'; then
-            local userinfo hostinfo
-            userinfo="${ss_body%@*}"   # method:pwd 或 base64
-            hostinfo="${ss_body##*@}"  # host:port
-
-            # 提取 host 和 port（支持 IPv6 [::1]:port）
-            if echo "$hostinfo" | grep -q '^\['; then
-                LAND_ADDR="${hostinfo%]*}"; LAND_ADDR="${LAND_ADDR#[}"
-                LAND_PORT="${hostinfo##*]:}"
-            else
-                LAND_ADDR="${hostinfo%:*}"
-                LAND_PORT="${hostinfo##*:}"
-            fi
-
-            # 判断 userinfo 是否是 base64（不含 : 则是 base64）
-            if echo "$userinfo" | grep -q ':'; then
-                # SIP002 明文格式：method:password
-                LAND_METHOD="${userinfo%%:*}"
-                LAND_PASS="${userinfo#*:}"
-            else
-                # 旧格式：base64(method:password)
-                local decoded; decoded=$(echo "$userinfo" | base64 -d 2>/dev/null                     || echo "$userinfo" | base64 -di 2>/dev/null || true)
-                if [[ -n "$decoded" && "$decoded" == *:* ]]; then
-                    LAND_METHOD="${decoded%%:*}"
-                    LAND_PASS="${decoded#*:}"
-                else
-                    err "SS 链接解析失败，请检查格式"; return 1
-                fi
-            fi
+        if [[ "$ss_input_raw" == ss://* ]]; then
+            # 直接粘贴了 SS 链接
+            ss_link="$ss_input_raw"; break
+        elif [[ "$ss_input_raw" == "1" ]]; then
+            ask "粘贴 SS 链接: "; read -r ss_link
+            [[ "$ss_link" == ss://* ]] && break
+            err "请输入 ss:// 开头的链接"; ss_link=""
+        elif [[ "$ss_input_raw" == "2" ]]; then
+            ss_link=""; break   # 手动输入模式
         else
-            err "SS 链接格式不正确，应为 ss://...@host:port"; return 1
+            err "无效输入，请输入 1、2 或直接粘贴 ss:// 链接"
         fi
+    done
 
-        # 验证解析结果
-        if [[ -z "$LAND_ADDR" || -z "$LAND_PORT" || -z "$LAND_PASS" || -z "$LAND_METHOD" ]]; then
-            err "SS 链接解析失败: addr=$LAND_ADDR port=$LAND_PORT method=$LAND_METHOD"
-            return 1
-        fi
-        info "解析成功: ${LAND_METHOD} @ ${LAND_ADDR}:${LAND_PORT}"
-
+    if [[ -n "$ss_link" ]]; then
+        # ── 解析 SS 链接 ──
+        _parse_ss_link "$ss_link" || return 1
     else
         # ── 手动输入 ──
         ask "落地机 IP 或域名: "; read -r LAND_ADDR
@@ -760,7 +809,7 @@ deploy_relay() {
 
     # ── 线路机入站 (VLESS-Reality) ──
     banner "线路机入站配置"
-    ask_connect_addr  # 获取线路机自身公网IP
+    ask_relay_connect_addr  # 获取线路机自身公网IP
 
     local in_port sni
     ask "入站端口 (回车随机): "; read -r in_port; [[ -z "$in_port" ]] && in_port=$(random_port)
@@ -798,6 +847,13 @@ INFO
 
     # ── 写入配置 ──
     mkdir -p "$SB_CONF_DIR"
+
+    # LAND_PORT 必须是纯整数
+    local land_port_int; land_port_int=$(( LAND_PORT + 0 )) 2>/dev/null || land_port_int=0
+    if [[ $land_port_int -eq 0 ]]; then
+        err "落地机端口无效: ${LAND_PORT}"; return 1
+    fi
+
     cat > "$SB_CONFIG" <<JSON
 {
   "log": {"level": "warn", "output": "${SB_LOG}", "timestamp": true},
@@ -808,6 +864,10 @@ INFO
       "listen": "::",
       "listen_port": ${in_port},
       "users": ${users_json},
+      "multiplex": {
+        "enabled": true,
+        "padding": true
+      },
       "tls": {
         "enabled": true,
         "server_name": "${sni}",
@@ -825,22 +885,32 @@ INFO
       "type": "shadowsocks",
       "tag": "ss-land",
       "server": "${LAND_ADDR}",
-      "server_port": ${LAND_PORT},
+      "server_port": ${land_port_int},
       "method": "${LAND_METHOD}",
-      "password": "${LAND_PASS}"
+      "password": "${LAND_PASS}",
+      "network": "tcp"
     },
     {"type": "direct", "tag": "direct"},
     {"type": "block",  "tag": "block"}
   ],
   "route": {
-    "rules": [{"inbound": ["vless-relay-in"], "outbound": "ss-land"}],
+    "rules": [
+      {"inbound": ["vless-relay-in"], "outbound": "ss-land"}
+    ],
     "final": "direct"
   }
 }
 JSON
 
+    # 校验配置
+    if ! "$SB_BIN" check -c "$SB_CONFIG" 2>/dev/null; then
+        err "线路机配置校验失败:"
+        "$SB_BIN" check -c "$SB_CONFIG"
+        return 1
+    fi
+
     open_port "$in_port" tcp
-    info "✓ 线路机配置完成 | 入站端口:$in_port → 落地:${LAND_ADDR}:${LAND_PORT}"
+    info "✓ 线路机配置完成 | 入站端口:$in_port → 落地:${LAND_ADDR}:${land_port_int}"
 
     # ── 生成回到落地机的一键线路机安装命令 ──
     banner "一键安装命令 (在其他线路机上执行)"
@@ -1506,12 +1576,13 @@ do_install() {
 
 # 线路机配置独立写入,不走 assemble_and_write_config
 assemble_relay_check() {
-    "$SB_BIN" check -c "$SB_CONFIG" &>/dev/null || {
+    if "$SB_BIN" check -c "$SB_CONFIG" 2>/dev/null; then
+        info "线路机配置校验通过"
+    else
         err "线路机配置校验失败:"
         "$SB_BIN" check -c "$SB_CONFIG"
-        exit 1
-    }
-    info "线路机配置校验通过"
+        return 1
+    fi
 }
 
 do_uninstall() {

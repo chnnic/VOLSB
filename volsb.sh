@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.3.3
+#   版本   : 1.3.4
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.3.3"
+VOLSB_VER="1.3.4"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -1927,10 +1927,11 @@ do_install() {
     fi
 
     step "启动 sing-box 服务"
-    svc_start
-    # 等待进程就绪后二次确认状态
+    # 用 restart 而非 start，确保重装时也能加载最新配置
+    svc_restart 2>/dev/null || svc_start
+    # 等待端口就绪，最多10秒
     local retry=0
-    while ! svc_active 2>/dev/null && [[ $retry -lt 5 ]]; do
+    while ! svc_active 2>/dev/null && [[ $retry -lt 10 ]]; do
         sleep 1; (( retry++ )) || true
     done
 
@@ -1939,7 +1940,7 @@ do_install() {
     else
         err "启动失败! 查看日志:"
         [[ -f "$SB_LOG" ]] && tail -20 "$SB_LOG" || true
-        exit 1
+        return 1
     fi
 
     show_nodes
@@ -1949,6 +1950,8 @@ do_install() {
 
 # 线路机配置独立写入,不走 assemble_and_write_config
 assemble_relay_check() {
+    # 先注入 Clash API，再做最终校验
+    traffic_init_api
     if "$SB_BIN" check -c "$SB_CONFIG" 2>/dev/null; then
         info "线路机配置校验通过"
     else
@@ -1956,14 +1959,12 @@ assemble_relay_check() {
         "$SB_BIN" check -c "$SB_CONFIG"
         return 1
     fi
-    # 保存链接文件（线路机模式 ALL_LINKS 在 deploy_relay 里填充）
+    # 保存链接文件
     if [[ ${#ALL_LINKS[@]} -gt 0 ]]; then
         printf '%s
 ' "${ALL_LINKS[@]}" > "$SB_LINKS"
         info "已保存 ${#ALL_LINKS[@]} 条节点链接"
     fi
-    # 注入流量统计 API
-    traffic_init_api
 }
 
 do_uninstall() {

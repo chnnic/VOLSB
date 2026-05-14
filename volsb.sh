@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.2.9
+#   版本   : 1.3.0
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.2.9"
+VOLSB_VER="1.3.0"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -1003,6 +1003,8 @@ JSON
     else
         err "配置校验失败:"; "$SB_BIN" check -c "$SB_CONFIG"; return 1
     fi
+    # 自动注入流量统计 API
+    traffic_init_api
 }
 
 # ────── 初始化节点信息头 ──────
@@ -1147,16 +1149,16 @@ append_and_write_config() {
 SB_STAT_API="127.0.0.1:8080"  # sing-box 统计 API 监听地址
 
 traffic_init_api() {
-    # 注入 sing-box v2ray 兼容统计 API（用于按入站/用户统计流量）
-    if ! jq -e '.experimental.v2ray_api' "$SB_CONFIG" &>/dev/null; then
+    # 注入 Clash 兼容 API（HTTP，sing-box 全版本支持，用于流量统计）
+    if ! jq -e '.experimental.clash_api' "$SB_CONFIG" &>/dev/null; then
         local tmp; tmp=$(mktemp)
         jq '.experimental = (.experimental // {}) + {
-            "v2ray_api": {
-                "listen": "127.0.0.1:8080",
-                "stats": {"enabled": true, "inbounds": true, "outbounds": true, "users": true}
+            "clash_api": {
+                "external_controller": "127.0.0.1:9090",
+                "secret": ""
             }
         }' "$SB_CONFIG" > "$tmp" && mv "$tmp" "$SB_CONFIG"
-        info "已启用流量统计 API ($SB_STAT_API)"
+        info "已启用 Clash API (127.0.0.1:9090)"
     fi
 }
 
@@ -1550,90 +1552,98 @@ HDR
         echo -e "  服务状态: ${C_GREEN}● 运行中${NC}"
     else
         echo -e "  服务状态: ${C_RED}● 已停止${NC}"
-        warn "服务未运行，流量数据不可用"
     fi
     echo ""
 
     [[ ! -f "$SB_CONFIG" ]] && { warn "配置文件不存在"; return; }
 
-    # ── 方法1: sing-box v2ray_api 按入站统计（最准确）──
-    local api_ok=false
-    if jq -e '.experimental.v2ray_api' "$SB_CONFIG" &>/dev/null; then
-        local api_addr
-        api_addr=$(jq -r '.experimental.v2ray_api.listen // "127.0.0.1:8080"' "$SB_CONFIG")
+    local clash_api
+    clash_api=$(jq -r '.experimental.clash_api.external_controller // ""' "$SB_CONFIG" 2>/dev/null)
 
-        # 调用 grpc 统计（sing-box 1.8+ 支持 HTTP query stats）
-        local stat_url="http://${api_addr}/stats/query?reset=false&pattern="
-        local stat_raw
-        stat_raw=$(curl -fsSL --max-time 3 "$stat_url" 2>/dev/null) || stat_raw=""
+    # ── Clash API 实时速率 ──
+    if [[ -n "$clash_api" ]] && curl -fsSL --max-time 2 "http://${clash_api}/version" &>/dev/null; then
+        echo -e "  ${C_BOLD}实时速率 (Clash API):${NC}"
+        hr
 
-        if [[ -n "$stat_raw" ]] && echo "$stat_raw" | jq -e '.stat' &>/dev/null; then
-            api_ok=true
-            echo -e "  ${C_BOLD}按入站/出站流量统计 (sing-box API):${NC}"
-            hr
-            printf "  ${C_BOLD}%-35s %-16s %-16s${NC}\n" "统计项" "上行" "下行"
-            hr
+        # 采样2次取速率差值（更准确）
+        local t1_up t1_down t2_up t2_down
+        local traffic1; traffic1=$(curl -fsSL --max-time 2 "http://${clash_api}/traffic" 2>/dev/null | tail -1)
+        t1_up=$(echo   "$traffic1" | jq -r '.up   // 0' 2>/dev/null | tr -d '[:space:]'); t1_up=$(( ${t1_up:-0}+0 ))
+        t1_down=$(echo "$traffic1" | jq -r '.down // 0' 2>/dev/null | tr -d '[:space:]'); t1_down=$(( ${t1_down:-0}+0 ))
 
-            echo "$stat_raw" | jq -r '.stat[] | "\(.name)|\(.value)"' 2>/dev/null \
-            | while IFS='|' read -r name value; do
-                value=$(( ${value:-0} + 0 )) 2>/dev/null || value=0
-                # 只显示入站（inbound）和用户（user）统计
-                if [[ "$name" == *"inbound>>>"* || "$name" == *"user>>>"* ]]; then
-                    local dir label
-                    if [[ "$name" == *">>>uplink" ]]; then
-                        dir="up"; label="${name/>>>uplink/}"
-                    else
-                        dir="down"; label="${name/>>>downlink/}"
-                    fi
-                    printf "  %-35s" "$label"
-                    [[ "$dir" == "up"   ]] && printf " ${C_YELLOW}%-16s${NC}" "$(human_bytes $value)" || true
-                    [[ "$dir" == "down" ]] && printf " ${C_GREEN}%-16s${NC}\n" "$(human_bytes $value)" || true
-                fi
-            done
-            hr
+        sleep 1
+
+        local traffic2; traffic2=$(curl -fsSL --max-time 2 "http://${clash_api}/traffic" 2>/dev/null | tail -1)
+        t2_up=$(echo   "$traffic2" | jq -r '.up   // 0' 2>/dev/null | tr -d '[:space:]'); t2_up=$(( ${t2_up:-0}+0 ))
+        t2_down=$(echo "$traffic2" | jq -r '.down // 0' 2>/dev/null | tr -d '[:space:]'); t2_down=$(( ${t2_down:-0}+0 ))
+
+        printf "  ↑ 上行: ${C_YELLOW}%s/s${NC}   ↓ 下行: ${C_GREEN}%s/s${NC}\n" \
+            "$(human_bytes $t1_up)" "$(human_bytes $t1_down)"
+
+        # 活跃连接数
+        local conns_raw conn_count
+        conns_raw=$(curl -fsSL --max-time 2 "http://${clash_api}/connections" 2>/dev/null)
+        conn_count=$(echo "$conns_raw" | jq '.connections | length' 2>/dev/null | tr -d '[:space:]') || conn_count=0
+        conn_count=$(( ${conn_count:-0}+0 ))
+        echo -e "  活跃连接: ${C_CYAN}${conn_count}${NC} 个"
+
+        if [[ $conn_count -gt 0 ]]; then
+            echo ""
+            echo -e "  ${C_BOLD}连接详情 (最近10条):${NC}"
+            echo "$conns_raw" | jq -r '
+                .connections[:10][] |
+                "  \(.metadata.type) \(.metadata.sourceIP):\(.metadata.sourcePort) → \(.metadata.destinationAddress // .metadata.host):\(.metadata.destinationPort)  [\(.chains[0] // "")]"
+            ' 2>/dev/null | head -10 || true
         fi
+        hr
+    else
+        warn "Clash API 不可用 (${clash_api:-未配置})"
+        echo -e "  ${C_DIM}执行菜单 1 重新安装，或 volsb restart 重启后生效${NC}"
+        hr
     fi
 
-    # ── 方法2: 按端口当前连接数（/proc/net/tcp + udp）──
+    # ── 按端口当前连接数（/proc/net） ──
     echo ""
-    echo -e "  ${C_BOLD}当前活跃连接数 (per 端口):${NC}"
+    echo -e "  ${C_BOLD}入站端口连接数:${NC}"
     hr
-    printf "  ${C_BOLD}%-10s %-22s %-12s %-12s %s${NC}\n" \
-        "端口" "类型" "TCP" "UDP" "合计"
+    printf "  ${C_BOLD}%-10s %-22s %-12s %-12s %s${NC}\n" "端口" "类型" "TCP" "UDP" "合计"
     hr
 
     local inbounds_raw
-    inbounds_raw=$(jq -r         '.inbounds[] | [(.listen_port|if . then tostring else "" end), (.type//"unknown"), (.listen//"")] | join("|")'         "$SB_CONFIG" 2>/dev/null) || inbounds_raw=""
+    inbounds_raw=$(jq -r '.inbounds[] |
+        [(.listen_port//0|tostring), (.type//"unknown"), (.listen//"")]
+        | join("|")' "$SB_CONFIG" 2>/dev/null) || inbounds_raw=""
 
-    local any_conn=false
     while IFS='|' read -r port type listen; do
         [[ -z "$port" || "$port" == "0" || "$listen" == "127.0.0.1" ]] && continue
 
-        local hex_port tcp_c udp_c
-        hex_port=$(printf "%04X" "$port" 2>/dev/null) || continue
+        # 十六进制端口（大写，4位，/proc/net/tcp 格式）
+        local hex_port; hex_port=$(printf "%04X" "$port" 2>/dev/null) || continue
 
-        tcp_c=$(awk -v p=":$hex_port" \
-            'NR>1 && $2~p && $4=="01" {c++} END{print c+0}' \
+        # /proc/net/tcp: 第2列是本地地址 "0.0.0.0:PORT" 格式为 "00000000:HEX"
+        # 第4列状态 01=ESTABLISHED
+        local tcp_c udp_c
+        tcp_c=$(awk -v h=":${hex_port}" \
+            'NR>1 && $2~h && $4=="01" {c++} END{print c+0}' \
             /proc/net/tcp /proc/net/tcp6 2>/dev/null | tr -d '[:space:]')
-        tcp_c=$(( ${tcp_c:-0} + 0 )) 2>/dev/null || tcp_c=0
+        tcp_c=$(( ${tcp_c:-0}+0 )) 2>/dev/null || tcp_c=0
 
-        udp_c=$(awk -v p=":$hex_port" \
-            'NR>1 && $2~p {c++} END{print c+0}' \
+        udp_c=$(awk -v h=":${hex_port}" \
+            'NR>1 && $2~h {c++} END{print c+0}' \
             /proc/net/udp /proc/net/udp6 2>/dev/null | tr -d '[:space:]')
-        udp_c=$(( ${udp_c:-0} + 0 )) 2>/dev/null || udp_c=0
+        udp_c=$(( ${udp_c:-0}+0 )) 2>/dev/null || udp_c=0
 
         local total=$(( tcp_c + udp_c ))
         printf "  ${C_CYAN}%-10s${NC} %-22s " "$port" "$type"
         if [[ $total -gt 0 ]]; then
             printf "${C_GREEN}%-12s %-12s %s${NC}\n" "$tcp_c" "$udp_c" "${total} 个"
-            any_conn=true
         else
             printf "${C_DIM}%-12s %-12s %s${NC}\n" "0" "0" "无"
         fi
     done <<< "$inbounds_raw"
     hr
 
-    # ── 方法3: 网卡总量 + 实时速率 ──
+    # ── 网卡累计流量 + 实时速率 ──
     echo ""
     echo -e "  ${C_BOLD}网卡流量:${NC}"
     local iface
@@ -1645,7 +1655,6 @@ HDR
         printf "  接口 ${C_CYAN}%s${NC} | 累计 ↓ ${C_GREEN}%s${NC}  ↑ ${C_YELLOW}%s${NC}\n" \
             "$iface" "$(human_bytes $rx)" "$(human_bytes $tx)"
 
-        # 实时速率（1秒采样）
         local r1 t1 r2 t2
         r1=$(awk -v i="${iface}:" '$1==i{print $2}'  /proc/net/dev 2>/dev/null | tr -d '[:space:]'); r1=$(( ${r1:-0}+0 ))
         t1=$(awk -v i="${iface}:" '$1==i{print $10}' /proc/net/dev 2>/dev/null | tr -d '[:space:]'); t1=$(( ${t1:-0}+0 ))
@@ -1653,13 +1662,7 @@ HDR
         r2=$(awk -v i="${iface}:" '$1==i{print $2}'  /proc/net/dev 2>/dev/null | tr -d '[:space:]'); r2=$(( ${r2:-0}+0 ))
         t2=$(awk -v i="${iface}:" '$1==i{print $10}' /proc/net/dev 2>/dev/null | tr -d '[:space:]'); t2=$(( ${t2:-0}+0 ))
         printf "  实时速率 | ↓ ${C_GREEN}%s/s${NC}  ↑ ${C_YELLOW}%s/s${NC}\n" \
-            "$(human_bytes $(( r2 - r1 )))" "$(human_bytes $(( t2 - t1 )))"
-    fi
-
-    if ! $api_ok; then
-        echo ""
-        warn "按入站流量统计不可用。重新安装或执行以下命令后重启服务可启用:"
-        echo -e "  ${C_DIM}volsb restart${NC}"
+            "$(human_bytes $(( r2-r1 )))" "$(human_bytes $(( t2-t1 )))"
     fi
 
     echo ""; hr
@@ -1912,7 +1915,6 @@ do_install() {
         ask_connect_addr
         select_protocols
         assemble_and_write_config
-        traffic_init_api
     fi
 
     step "启动 sing-box 服务"

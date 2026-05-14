@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.0.2
+#   版本   : 1.0.3
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS
@@ -27,7 +27,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.0.2"
+VOLSB_VER="1.0.3"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -368,11 +368,13 @@ ask_connect_addr() {
 }
 
 # ────── 多用户输入 ──────
+# 结果写入全局变量 USER_COUNT，避免子 shell 吞掉 read
+USER_COUNT=1
 ask_multi_user_count() {
-    ask "生成节点数量 (1-10, 回车默认1): "; read -r cnt
-    [[ "$cnt" =~ ^[1-9][0-9]?$ ]] || cnt=1
-    [[ "$cnt" -gt 10 ]] && cnt=10
-    echo "$cnt"
+    ask "生成节点数量 (1-10, 回车默认1): "; read -r _cnt
+    [[ "$_cnt" =~ ^[1-9][0-9]?$ ]] || _cnt=1
+    [[ "$_cnt" -gt 10 ]] && _cnt=10
+    USER_COUNT="$_cnt"
 }
 
 # ────── 协议 1: VLESS + XTLS-Reality ──────
@@ -403,7 +405,7 @@ deploy_vless_reality() {
     local priv_key; priv_key=$(echo "$keypair" | awk '/PrivateKey/{print $2}')
     local pub_key;  pub_key=$(echo  "$keypair" | awk '/PublicKey/{print $2}')
 
-    local user_count; user_count=$(ask_multi_user_count)
+    ask_multi_user_count; local user_count="$USER_COUNT"
     local users_json="["
     local first=true
 
@@ -485,7 +487,7 @@ deploy_hysteria2() {
         cert_path="${pair%%:*}"; key_path="${pair##*:}"
     fi
 
-    local user_count; user_count=$(ask_multi_user_count)
+    ask_multi_user_count; local user_count="$USER_COUNT"
     local users_json="["; local first=true
     for i in $(seq 1 "$user_count"); do
         local pwd; pwd=$(gen_rand_str 24)
@@ -537,7 +539,7 @@ deploy_vmess_ws() {
     [[ -z "$ws_path" ]] && ws_path="/$(gen_rand_hex 6)"
     [[ "${ws_path:0:1}" != "/" ]] && ws_path="/${ws_path}"
 
-    local user_count; user_count=$(ask_multi_user_count)
+    ask_multi_user_count; local user_count="$USER_COUNT"
     local users_json="["; local first=true
     for i in $(seq 1 "$user_count"); do
         local uuid; uuid=$(gen_uuid)
@@ -594,7 +596,7 @@ deploy_trojan() {
         cert_path="${pair%%:*}"; key_path="${pair##*:}"
     fi
 
-    local user_count; user_count=$(ask_multi_user_count)
+    ask_multi_user_count; local user_count="$USER_COUNT"
     local users_json="["; local first=true
     for i in $(seq 1 "$user_count"); do
         local pwd; pwd=$(gen_rand_str 24)
@@ -646,7 +648,7 @@ deploy_shadowtls() {
     ask "伪装 SNI [默认 www.bing.com]: "; read -r sni; [[ -z "$sni" ]] && sni="www.bing.com"
 
     local ss_port; ss_port=$(random_port)
-    local user_count; user_count=$(ask_multi_user_count)
+    ask_multi_user_count; local user_count="$USER_COUNT"
     local stls_users="["; local ss_users="["; local first=true
 
     for i in $(seq 1 "$user_count"); do
@@ -737,7 +739,7 @@ deploy_relay() {
     local priv_key; priv_key=$(echo "$keypair" | awk '/PrivateKey/{print $2}')
     local pub_key;  pub_key=$(echo  "$keypair" | awk '/PublicKey/{print $2}')
 
-    local user_count; user_count=$(ask_multi_user_count)
+    ask_multi_user_count; local user_count="$USER_COUNT"
     local users_json="["; local short_ids="["; local first=true
 
     for i in $(seq 1 "$user_count"); do
@@ -1122,6 +1124,8 @@ reset_ports() {
 #  主安装流程
 # ════════════════════════════════════════════════════════════
 
+# 结果写入全局变量 DEPLOY_MODE，避免子 shell 吞掉 read
+DEPLOY_MODE="1"
 select_deploy_mode() {
     clear
     echo -e "${C_BOLD}${C_CYAN}"
@@ -1145,11 +1149,11 @@ LOGO
     hr
     # 支持环境变量 VOLSB_MODE 跳过交互
     if [[ -n "${VOLSB_MODE:-}" ]]; then
-        echo "$VOLSB_MODE"; return
+        DEPLOY_MODE="$VOLSB_MODE"; return
     fi
-    ask "选择模式 [1/2] 默认1: "; read -r mode
-    [[ -z "$mode" ]] && mode="1"
-    echo "$mode"
+    ask "选择模式 [1/2] 默认1: "; read -r _mode
+    [[ -z "$_mode" ]] && _mode="1"
+    DEPLOY_MODE="$_mode"
 }
 
 do_install() {
@@ -1182,9 +1186,9 @@ do_install() {
 ==============================================
 HDR
 
-    local mode; mode=$(select_deploy_mode)
+    select_deploy_mode
 
-    if [[ "$mode" == "2" ]]; then
+    if [[ "$DEPLOY_MODE" == "2" ]]; then
         # 线路机模式
         deploy_relay
         assemble_relay_check

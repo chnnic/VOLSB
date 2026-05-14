@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.0.7
+#   版本   : 1.0.8
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS
@@ -10,7 +10,8 @@
 #   快捷键 : 安装后输入 volsb 进入管理界面
 # =============================================================================
 
-set -euo pipefail
+# 注意：不使用全局 set -e，交互式脚本需要手动处理每处错误
+set -uo pipefail
 
 # ──────────────────────── 颜色 & 输出 ────────────────────────
 C_RED='\033[0;31m'; C_GREEN='\033[0;32m'; C_YELLOW='\033[1;33m'
@@ -28,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.0.7"
+VOLSB_VER="1.0.8"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -846,7 +847,10 @@ BANNER
 }
 
 assemble_and_write_config() {
-    [[ -x "$SB_BIN" ]] || die "sing-box 未安装，无法生成配置。请先执行安装。"
+    if [[ ! -x "$SB_BIN" ]]; then
+        err "sing-box 未安装，请先执行菜单选项 1 安装"
+        return 1
+    fi
     ALL_INBOUNDS=()
     ALL_LINKS=()
 
@@ -1147,6 +1151,12 @@ do_install() {
         install_binary "$ver"
     fi
 
+    # 验证安装成功
+    if [[ ! -x "$SB_BIN" ]]; then
+        err "sing-box 安装失败，请检查网络后重试"
+        return 1
+    fi
+
     install_service
     install_shortcut
 
@@ -1395,24 +1405,25 @@ LOGO
         ask "请选择 [0-14]: "; read -r opt
 
         case "$opt" in
-            1)  do_install ;;
-            2)  require_root; ask_connect_addr; select_protocols; assemble_and_write_config
-                svc_restart && info "配置已更新" ;;
-            3)  do_update_menu ;;
-            4)  do_uninstall ;;
-            5)  require_root; svc_start  && info "已启动" ;;
-            6)  require_root; svc_stop   && info "已停止" ;;
-            7)  require_root; svc_restart && info "已重启" ;;
-            8)  svc_status ;;
-            9)  show_nodes ;;
-            10) reset_ports ;;
+            1)  do_install || true ;;
+            2)  require_root; ask_connect_addr; select_protocols
+                assemble_and_write_config || true
+                svc_restart && info "配置已更新" || true ;;
+            3)  do_update_menu || true ;;
+            4)  do_uninstall || true ;;
+            5)  require_root; svc_start  && info "已启动" || true ;;
+            6)  require_root; svc_stop   && info "已停止" || true ;;
+            7)  require_root; svc_restart && info "已重启" || true ;;
+            8)  svc_status || true ;;
+            9)  show_nodes || true ;;
+            10) reset_ports || true ;;
             11) require_root; ${EDITOR:-vi} "$SB_CONFIG"
                 "$SB_BIN" check -c "$SB_CONFIG" &>/dev/null && {
                     svc_restart && info "配置已保存并重启"
-                } || { err "配置有误,未重启"; "$SB_BIN" check -c "$SB_CONFIG"; } ;;
-            12) show_traffic ;;
-            13) reset_traffic_log ;;
-            14) [[ -f "$SB_LOG" ]] && tail -f "$SB_LOG" || journalctl -u sing-box -f ;;
+                } || { err "配置有误,未重启"; "$SB_BIN" check -c "$SB_CONFIG" || true; } ;;
+            12) show_traffic || true ;;
+            13) reset_traffic_log || true ;;
+            14) [[ -f "$SB_LOG" ]] && tail -f "$SB_LOG" || journalctl -u sing-box -f || true ;;
             0)  exit 0 ;;
             *)  warn "无效选项: $opt" ;;
         esac

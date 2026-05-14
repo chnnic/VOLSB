@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.3.2
+#   版本   : 1.3.3
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.3.2"
+VOLSB_VER="1.3.3"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -917,7 +917,7 @@ JSON
     echo ""
     echo -e "  ${C_YELLOW}以下命令可直接在其他 VPS 上运行,生成相同配置的线路机:${NC}"
     echo ""
-    local script_url="https://raw.githubusercontent.com/your-repo/volsb/main/volsb.sh"
+    local script_url="$VOLSB_REPO"
     echo -e "  ${C_CYAN}bash <(curl -fsSL ${script_url}) relay \\
     --land-addr '${LAND_ADDR}' \\
     --land-port '${LAND_PORT}' \\
@@ -1956,6 +1956,14 @@ assemble_relay_check() {
         "$SB_BIN" check -c "$SB_CONFIG"
         return 1
     fi
+    # 保存链接文件（线路机模式 ALL_LINKS 在 deploy_relay 里填充）
+    if [[ ${#ALL_LINKS[@]} -gt 0 ]]; then
+        printf '%s
+' "${ALL_LINKS[@]}" > "$SB_LINKS"
+        info "已保存 ${#ALL_LINKS[@]} 条节点链接"
+    fi
+    # 注入流量统计 API
+    traffic_init_api
 }
 
 do_uninstall() {

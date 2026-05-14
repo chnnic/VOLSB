@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.1.2
+#   版本   : 1.1.3
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.1.2"
+VOLSB_VER="1.1.3"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -917,12 +917,18 @@ traffic_init_api() {
 }
 
 human_bytes() {
-    local b="$1"
+    # 清除换行/空格，强制转整数，防止 awk/jq 输出带换行导致比较报错
+    local b
+    b=$(echo "${1:-0}" | tr -d '[:space:]')
+    b=$(( b + 0 )) 2>/dev/null || b=0
     if   [[ $b -ge 1073741824 ]]; then printf "%.2f GB" "$(echo "scale=2; $b/1073741824" | bc)"
     elif [[ $b -ge 1048576 ]];    then printf "%.2f MB" "$(echo "scale=2; $b/1048576" | bc)"
     elif [[ $b -ge 1024 ]];       then printf "%.2f KB" "$(echo "scale=2; $b/1024" | bc)"
     else printf "%d B" "$b"; fi
 }
+
+# 清洗数值：去换行空格，转整数，出错返回0
+clean_num() { local v; v=$(echo "${1:-0}" | tr -d '[:space:]'); echo $(( v + 0 )) 2>/dev/null || echo 0; }
 
 show_traffic() {
     clear
@@ -963,16 +969,23 @@ HDR
 
             # 读取 iptables 该端口统计（TCP）
             local rx_bytes rx_pkts tx_bytes tx_pkts
-            rx_bytes=$(iptables -L INPUT  -v -n -x 2>/dev/null                 | awk -v p="$port" '$0 ~ "dpt:"p || $0 ~ "dport "p {sum+=$2} END{print sum+0}')
-            tx_bytes=$(iptables -L OUTPUT -v -n -x 2>/dev/null                 | awk -v p="$port" '$0 ~ "spt:"p || $0 ~ "sport "p {sum+=$2} END{print sum+0}')
-            rx_pkts=$(iptables  -L INPUT  -v -n -x 2>/dev/null                 | awk -v p="$port" '$0 ~ "dpt:"p || $0 ~ "dport "p {sum+=$1} END{print sum+0}')
+            rx_bytes=$(iptables -L INPUT  -v -n -x 2>/dev/null                 | awk -v p="$port" '$0 ~ "dpt:"p || $0 ~ "dport "p {sum+=$2} END{print sum+0}' | tr -d '[:space:]')
+            rx_bytes=$(( rx_bytes + 0 )) 2>/dev/null || rx_bytes=0
+            tx_bytes=$(iptables -L OUTPUT -v -n -x 2>/dev/null                 | awk -v p="$port" '$0 ~ "spt:"p || $0 ~ "sport "p {sum+=$2} END{print sum+0}' | tr -d '[:space:]')
+            tx_bytes=$(( tx_bytes + 0 )) 2>/dev/null || tx_bytes=0
+            rx_pkts=$(iptables  -L INPUT  -v -n -x 2>/dev/null                 | awk -v p="$port" '$0 ~ "dpt:"p || $0 ~ "dport "p {sum+=$1} END{print sum+0}' | tr -d '[:space:]')
+            rx_pkts=$(( rx_pkts + 0 )) 2>/dev/null || rx_pkts=0
             # UDP
             local rx_udp
-            rx_udp=$(iptables -L INPUT -v -n -x 2>/dev/null                 | awk -v p="$port" '/udp/ && ($0 ~ "dpt:"p) {sum+=$2} END{print sum+0}')
+            rx_udp=$(iptables -L INPUT -v -n -x 2>/dev/null                 | awk -v p="$port" '/udp/ && ($0 ~ "dpt:"p) {sum+=$2} END{print sum+0}' | tr -d '[:space:]')
+            rx_udp=$(( rx_udp + 0 )) 2>/dev/null || rx_udp=0
             rx_bytes=$(( rx_bytes + rx_udp ))
 
-            printf "  ${C_CYAN}%-10s${NC} %-20s %-15s %-15s %s
-"                 "$port" "$type"                 "$(human_bytes ${rx_bytes:-0})"                 "$(human_bytes ${tx_bytes:-0})"                 "${rx_pkts:-0} pkt"
+            printf "  ${C_CYAN}%-10s${NC} %-20s %-15s %-15s %s\n" \
+                "$port" "$type" \
+                "$(human_bytes ${rx_bytes:-0})" \
+                "$(human_bytes ${tx_bytes:-0})" \
+                "${rx_pkts:-0} pkt"
         done
         hr
     fi
@@ -1000,8 +1013,10 @@ HDR
             # 把端口转十六进制查 /proc/net/tcp 和 tcp6
             local hex_port; hex_port=$(printf "%04X" "$port")
             local tcp_conns udp_conns
-            tcp_conns=$(cat /proc/net/tcp  /proc/net/tcp6  2>/dev/null                 | awk -v p=":$hex_port" '$2 ~ p && $4=="01" {c++} END{print c+0}')
-            udp_conns=$(cat /proc/net/udp  /proc/net/udp6  2>/dev/null                 | awk -v p=":$hex_port" '$2 ~ p {c++} END{print c+0}')
+            tcp_conns=$(cat /proc/net/tcp  /proc/net/tcp6  2>/dev/null                 | awk -v p=":$hex_port" '$2 ~ p && $4=="01" {c++} END{print c+0}' | tr -d '[:space:]')
+            tcp_conns=$(( tcp_conns + 0 )) 2>/dev/null || tcp_conns=0
+            udp_conns=$(cat /proc/net/udp  /proc/net/udp6  2>/dev/null                 | awk -v p=":$hex_port" '$2 ~ p {c++} END{print c+0}' | tr -d '[:space:]')
+            udp_conns=$(( udp_conns + 0 )) 2>/dev/null || udp_conns=0
             local total=$(( tcp_conns + udp_conns ))
 
             printf "  ${C_CYAN}%-10s${NC} %-20s " "$port" "$type"
@@ -1029,10 +1044,13 @@ HDR
     # ── 方法4: 实时速率（读两次 /proc/net/dev 取差值）──
     if [[ -n "${iface:-}" ]] && [[ -f /proc/net/dev ]]; then
         local r1 t1 r2 t2
-        r1=$(awk -v i="${iface}:" '$1==i{print $2}'  /proc/net/dev 2>/dev/null || echo 0)
-        t1=$(awk -v i="${iface}:" '$1==i{print $10}' /proc/net/dev 2>/dev/null || echo 0)
+        r1=$(awk -v i="${iface}:" '$1==i{print $2}'  /proc/net/dev 2>/dev/null || echo 0 | tr -d '[:space:]')
+        r1=$(( r1 + 0 )) 2>/dev/null || r1=0
+        t1=$(awk -v i="${iface}:" '$1==i{print $10}' /proc/net/dev 2>/dev/null || echo 0 | tr -d '[:space:]')
+        t1=$(( t1 + 0 )) 2>/dev/null || t1=0
         sleep 1
-        r2=$(awk -v i="${iface}:" '$1==i{print $2}'  /proc/net/dev 2>/dev/null || echo 0)
+        r2=$(awk -v i="${iface}:" '$1==i{print $2}'  /proc/net/dev 2>/dev/null || echo 0 | tr -d '[:space:]')
+        r2=$(( r2 + 0 )) 2>/dev/null || r2=0
         t2=$(awk -v i="${iface}:" '$1==i{print $10}' /proc/net/dev 2>/dev/null || echo 0)
         local rx_rate=$(( r2 - r1 ))
         local tx_rate=$(( t2 - t1 ))

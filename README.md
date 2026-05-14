@@ -1,0 +1,272 @@
+# VOLSB
+
+> sing-box 服务端一键部署与管理脚本
+
+```
+  ██╗   ██╗ ██████╗ ██╗     ███████╗██████╗
+  ██║   ██║██╔═══██╗██║     ██╔════╝██╔══██╗
+  ██║   ██║██║   ██║██║     ███████╗██████╔╝
+  ╚██╗ ██╔╝██║   ██║██║     ╚════██║██╔══██╗
+   ╚████╔╝ ╚██████╔╝███████╗███████║██████╔╝
+    ╚═══╝   ╚═════╝ ╚══════╝╚══════╝╚═════╝
+```
+
+[![Version](https://img.shields.io/badge/version-1.2.9-blue.svg)](https://github.com/chnnic/VOLSB)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![sing-box](https://img.shields.io/badge/sing--box-1.12%2B-orange.svg)](https://github.com/SagerNet/sing-box)
+
+---
+
+## 简介
+
+VOLSB 是一个功能完整的 **sing-box 服务端** 一键部署脚本，支持落地机和线路机（中转机）两种部署模式，安装后通过 `volsb` 命令进入管理界面。
+
+---
+
+## 功能特性
+
+### 🎯 部署机（落地机）
+
+| 功能 | 说明 |
+|------|------|
+| 一键安装 | 自动下载 sing-box 最新版并部署 |
+| 多协议支持 | VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS v3 |
+| 多节点生成 | 每个协议支持同时生成 1-10 个节点（独立 UUID/密码） |
+| 自动生成密钥 | Reality 密钥对、UUID、ShortID 全自动生成 |
+| 自定义连接地址 | 自动检测公网 IP 或手动输入 IP/DDNS 域名 |
+| 分享链接 | 自动生成标准分享链接，支持二维码输出 |
+| 追加协议 | 可在不删除旧节点的情况下追加新协议 |
+
+### 🔗 线路机（中转机）
+
+| 功能 | 说明 |
+|------|------|
+| 一键部署 | VLESS+Reality 入站 → Shadowsocks 出站 → 落地机 |
+| SS 链接解析 | 支持直接粘贴 `ss://` 链接自动解析落地机信息 |
+| 手动输入 | 支持手动填写落地机 IP、端口、密码、加密方式 |
+| 连通性验证 | 六步自动验证转发链路是否正常 |
+| 一键安装命令 | 生成可直接在其他 VPS 运行的线路机安装命令 |
+
+### ⚙️ 系统管理
+
+| 功能 | 说明 |
+|------|------|
+| 服务控制 | 启动 / 停止 / 重启 / 查看状态 |
+| 版本管理 | 一键升级 sing-box 核心 / 更新 VOLSB 脚本自身 |
+| 端口重置 | 支持单独重置端口、密码/UUID 或同时重置 |
+| 流量统计 | 按入站端口统计连接数，网卡累计流量及实时速率 |
+| 时间同步 | 四级兜底强制同步系统时间（NTP/chrony/ntpdate/HTTP） |
+| 卸载清理 | 完整移除 sing-box 及所有配置文件 |
+
+### 🖥️ 系统兼容
+
+| 初始化系统 | 发行版 |
+|-----------|--------|
+| **systemd** | Debian / Ubuntu / CentOS / RHEL / AlmaLinux / Rocky / Fedora / openSUSE / Arch |
+| **OpenRC** | Alpine Linux |
+
+---
+
+## 快速开始
+
+### 一键安装
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh)
+```
+
+安装完成后，输入 `volsb` 进入管理界面。
+
+### 直接执行命令
+
+```bash
+volsb                # 进入交互式管理界面
+volsb install        # 全新安装
+volsb add            # 追加协议（保留旧节点）
+volsb update         # 升级 sing-box 核心版本
+volsb self-update    # 更新 VOLSB 脚本自身
+volsb start          # 启动服务
+volsb stop           # 停止服务
+volsb restart        # 重启服务
+volsb status         # 查看运行状态
+volsb info           # 查看节点信息和分享链接
+volsb traffic        # 查看流量统计
+volsb log            # 实时日志
+volsb sync-time      # 强制同步系统时间
+volsb verify         # 验证线路机转发连通性
+volsb uninstall      # 完全卸载
+```
+
+---
+
+## 管理界面
+
+```
+  ██╗   ██╗ ██████╗ ██╗     ███████╗██████╗
+  ...
+  v1.2.9  |  2026-05-14 18:00:00
+
+  状态: ● 运行中
+  版本: 1.13.11
+  节点: 6 条链接
+  ────────────────────────────────────────────
+  📦 安装管理
+   1) 全新安装 / 重新部署
+   2) 追加新协议
+   3) 更新 (脚本/sing-box)
+   4) 卸载
+
+  ⚙️  服务控制
+   5) 启动    6) 停止    7) 重启    8) 查看状态
+
+  📋 节点与配置
+   9) 查看节点信息 & 分享链接
+  10) 重置端口 / 密码 / UUID
+  11) 编辑配置文件
+
+  📊 流量管理
+  12) 查看流量统计
+  13) 清空流量日志
+  14) 实时日志
+
+  🔍 诊断
+  15) 验证线路机转发连通性
+  16) 强制同步系统时间
+  ────────────────────────────────────────────
+   0) 退出
+```
+
+---
+
+## 协议说明
+
+| # | 协议 | 传输 | 特点 |
+|---|------|------|------|
+| 1 | VLESS + XTLS-Reality | TCP | ★ 推荐，抗审查首选，无需域名或证书 |
+| 2 | Hysteria2 | UDP | ★ 推荐，高速 UDP，弱网体验佳 |
+| 3 | VMess + WebSocket | TCP/WS | 适合套 CDN 或 Nginx TLS 反代 |
+| 4 | Trojan + TLS | TCP | 经典方案，客户端兼容性好 |
+| 5 | ShadowTLS v3 + Shadowsocks | TCP | 流量伪装为真实 TLS 握手 |
+
+---
+
+## 线路机部署
+
+线路机（中转机）将客户端流量通过 VLESS+Reality 接入，再经由 Shadowsocks 转发至落地机。
+
+```
+客户端 ──VLESS+Reality──► 线路机 ──Shadowsocks──► 落地机 ──► 互联网
+```
+
+### 部署流程
+
+1. 进入管理界面 → 选 **1) 全新安装**
+2. 选择部署模式 → 选 **2) 线路机（中转机）**
+3. 粘贴落地机 SS 链接，或手动输入落地机信息
+4. 配置线路机入站（端口、SNI、节点数量）
+5. 安装完成后通过 **15) 验证转发连通性** 确认链路正常
+
+### 支持的 SS 链接格式
+
+```bash
+# SIP002 明文格式
+ss://2022-blake3-aes-128-gcm:PASSWORD@host:port#备注
+
+# 旧版 Base64 格式
+ss://BASE64(method:password)@host:port#备注
+```
+
+粘贴时支持三种输入方式：
+- 直接在选项提示处粘贴完整 `ss://` 链接
+- 选 `1` 后粘贴链接
+- 选 `2` 手动逐项填写
+
+---
+
+## 追加协议
+
+选择菜单 **2) 追加新协议** 时，会检测已有节点并询问：
+
+```
+检测到已有 2 个入站节点:
+  - vless 端口:34305 [vless-reality-in]
+  - hysteria2 端口:21831 [hysteria2-in]
+
+选项:
+ 1) 保留旧节点，追加新节点（推荐）
+ 2) 清除旧节点，只保留新节点
+```
+
+选择保留旧节点后，新旧节点共存于同一配置文件中。
+
+---
+
+## 时间同步
+
+`2022-blake3-aes-128-gcm` 等现代加密方式对时间精度要求严格，**两端时间差超过 30 秒将导致连接静默失败**。
+
+```bash
+volsb sync-time
+# 或菜单 16) 强制同步系统时间
+```
+
+同步优先级：
+1. `timedatectl`（systemd 系统）
+2. `chronyc makestep`
+3. `ntpdate pool.ntp.org`
+4. HTTP 时间头（终极兜底，无需任何 NTP 工具）
+
+连通性验证时也会自动检测时间偏差并给出提示。
+
+---
+
+## 环境变量（自动化部署）
+
+支持通过环境变量跳过交互，适合 CI/CD 或批量部署场景：
+
+```bash
+VOLSB_MODE=1 \          # 1=部署机 2=线路机
+VOLSB_PROTO="1 2" \     # 协议选择（1=VLESS 2=HY2，0=全部）
+VOLSB_IP=1.2.3.4 \      # 指定连接地址
+VOLSB_PORT=443 \        # 指定入站端口
+VOLSB_SNI=www.cloudflare.com \  # 指定 Reality SNI
+bash volsb.sh install
+```
+
+---
+
+## 文件路径
+
+| 路径 | 说明 |
+|------|------|
+| `/usr/local/bin/sing-box` | sing-box 主程序 |
+| `/usr/local/bin/volsb` | volsb 快捷命令 |
+| `/etc/sing-box/config.json` | sing-box 配置文件 |
+| `/etc/sing-box/nodes.info` | 节点明文信息 |
+| `/etc/sing-box/links.txt` | 所有分享链接 |
+| `/etc/sing-box/certs/` | TLS 证书目录 |
+| `/var/log/sing-box/sing-box.log` | 运行日志 |
+| `/var/lib/sing-box/` | sing-box 数据目录 |
+
+---
+
+## 注意事项
+
+- **需要 root 权限**运行，建议 `sudo -i` 后执行
+- sing-box 最低版本要求 **1.12.0**（部分 DNS 配置格式已更新）
+- Hysteria2 和 Trojan 使用自签证书时，客户端需开启"跳过证书验证"
+- `2022-blake3-*` 系列加密的密码必须是 **base64 编码的固定字节随机数**，不可使用普通字符串
+- 线路机与落地机时间差必须 **小于 30 秒**
+
+---
+
+## 许可证
+
+MIT License
+
+---
+
+## 相关项目
+
+- [sing-box](https://github.com/SagerNet/sing-box) — 通用代理平台
+- [shadowsocks-rust](https://github.com/shadowsocks/shadowsocks-rust) — Shadowsocks Rust 实现

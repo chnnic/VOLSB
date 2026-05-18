@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.3.4
+#   版本   : 1.3.5
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
-#   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS
+#   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS
 #   系统   : Alpine(OpenRC) / Debian / Ubuntu / CentOS / RHEL /
 #             Alma / Rocky / Fedora / openSUSE / Arch
 #   快捷键 : 安装后输入 volsb 进入管理界面
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.3.4"
+VOLSB_VER="1.3.5"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -930,6 +930,73 @@ JSON
 #  配置组装 & 写入
 # ════════════════════════════════════════════════════════════
 
+# ────── 协议 6: AnyTLS ──────
+deploy_anytls() {
+    step "配置 AnyTLS"
+
+    local port cert_path key_path masq_domain insecure="true"
+
+    if [[ -n "${VOLSB_PORT:-}" ]]; then
+        port="$VOLSB_PORT"; info "端口 (环境变量): $port"
+    else
+        ask "监听端口 (回车随机):"; read -r port
+        [[ -z "$port" ]] && port=$(random_port)
+    fi
+
+    echo "  TLS 证书:"
+    echo "   1) 自签证书 (客户端需开 insecure)"
+    echo "   2) Let's Encrypt 正式证书"
+    ask "选择 [1/2] 默认1:"; read -r cchoice
+    [[ -z "$cchoice" ]] && cchoice="1"
+
+    if [[ "$cchoice" == "2" ]]; then
+        ask "域名:"; read -r masq_domain
+        [[ -z "$masq_domain" ]] && { err "域名不能为空"; return 1; }
+        acme_issue "$masq_domain"
+        cert_path="${SB_CERT_DIR}/${masq_domain}.crt"
+        key_path="${SB_CERT_DIR}/${masq_domain}.key"
+        insecure="false"
+    else
+        masq_domain="${CONNECT_ADDR}"
+        local pair; pair=$(gen_self_cert "$masq_domain")
+        cert_path="${pair%%:*}"; key_path="${pair##*:}"
+    fi
+
+    ask_multi_user_count; local user_count="$USER_COUNT"
+    local users_json="["; local idx=0
+
+    for i in $(seq 1 "$user_count"); do
+        local uuid; uuid=$(gen_uuid)
+        [[ $idx -gt 0 ]] && users_json+=","
+        (( idx++ )) || true
+        users_json+=$(printf '{"uuid":"%s"}' "$uuid")
+
+        local ins_param=""; [[ "$insecure" == "true" ]] && ins_param="&insecure=1"
+        local link="anytls://${uuid}@${CONNECT_ADDR}:${port}?sni=${masq_domain}${ins_param}#VOLSB-AnyTLS-${i}"
+        ALL_LINKS+=("$link")
+
+        cat >> "$SB_INFO" <<INFO
+  [AnyTLS #${i}]
+    地址     : ${CONNECT_ADDR}
+    端口     : ${port}
+    UUID     : ${uuid}
+    SNI      : ${masq_domain}
+    跳过验证 : ${insecure}
+    链接     : ${link}
+INFO
+    done
+    users_json+="]"
+
+    local inbound
+    inbound=$(jq -n         --argjson port  "$port"         --argjson users "$users_json"         --arg     cert  "$cert_path"         --arg     key   "$key_path"         '{type:"anytls",tag:"anytls-in",listen:"::",listen_port:$port,
+           users:$users,tls:{enabled:true,certificate_path:$cert,key_path:$key}}')
+    ALL_INBOUNDS+=("$inbound")
+
+    open_port "$port" tcp
+    info "✓ AnyTLS | 端口:$port | 用户数:$user_count"
+}
+
+
 select_protocols() {
     clear
     echo -e "${C_BOLD}${C_CYAN}"
@@ -947,6 +1014,7 @@ BANNER
     printf "  ${C_BOLD}%-5s${NC} %-30s %-10s %s\n" "3)" "VMess + WebSocket"        "TCP/WS" "适合套 CDN / Nginx 反代"
     printf "  ${C_BOLD}%-5s${NC} %-30s %-10s %s\n" "4)" "Trojan + TLS"             "TCP"   "经典方案,广泛兼容"
     printf "  ${C_BOLD}%-5s${NC} %-30s %-10s %s\n" "5)" "ShadowTLS v3 + SS"        "TCP"   "真实 TLS 握手伪装"
+    printf "  ${C_BOLD}%-5s${NC} %-30s %-10s %s\n" "6)" "AnyTLS"                   "TCP"   "新型TLS伪装,sing-box 1.11+"
     printf "  ${C_BOLD}%-5s${NC} %-30s %-10s %s\n" "0)" "全部协议"                 "-"     "同时部署以上所有"
     hr
     echo ""
@@ -955,12 +1023,12 @@ BANNER
     # 支持环境变量 VOLSB_PROTO 跳过交互
     local raw_input="${VOLSB_PROTO:-}"
     if [[ -z "$raw_input" ]]; then
-        ask "请选择协议 [0-5]:"; read -r raw_input
+        ask "请选择协议 [0-6]:"; read -r raw_input
     else
         info "协议选择 (环境变量): $raw_input"
     fi
     [[ -z "$raw_input" ]] && raw_input="1"
-    [[ "$raw_input" == "0" ]] && raw_input="1 2 3 4 5"
+    [[ "$raw_input" == "0" ]] && raw_input="1 2 3 4 5 6"
 
     SELECTED_PROTOS=()
     for n in $raw_input; do
@@ -970,6 +1038,7 @@ BANNER
             3) SELECTED_PROTOS+=("vmess_ws") ;;
             4) SELECTED_PROTOS+=("trojan") ;;
             5) SELECTED_PROTOS+=("shadowtls") ;;
+            6) SELECTED_PROTOS+=("anytls") ;;
             *) warn "忽略无效输入: $n" ;;
         esac
     done
@@ -1034,6 +1103,7 @@ assemble_and_write_config() {
             vmess_ws)      deploy_vmess_ws ;;
             trojan)        deploy_trojan ;;
             shadowtls)     deploy_shadowtls ;;
+            anytls)        deploy_anytls ;;
         esac
     done
 
@@ -1110,6 +1180,7 @@ append_and_write_config() {
             vmess_ws)      deploy_vmess_ws ;;
             trojan)        deploy_trojan ;;
             shadowtls)     deploy_shadowtls ;;
+            anytls)        deploy_anytls ;;
         esac
     done
 

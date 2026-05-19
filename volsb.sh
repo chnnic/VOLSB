@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.3.5
+#   版本   : 1.3.6
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.3.5"
+VOLSB_VER="1.3.6"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -966,20 +966,19 @@ deploy_anytls() {
     local users_json="["; local idx=0
 
     for i in $(seq 1 "$user_count"); do
-        local uuid; uuid=$(gen_uuid)
+        local pwd; pwd=$(gen_rand_str 24)
         [[ $idx -gt 0 ]] && users_json+=","
         (( idx++ )) || true
-        users_json+=$(printf '{"uuid":"%s"}' "$uuid")
+        users_json+=$(printf '{"password":"%s"}' "$pwd")
 
         local ins_param=""; [[ "$insecure" == "true" ]] && ins_param="&insecure=1"
-        local link="anytls://${uuid}@${CONNECT_ADDR}:${port}?sni=${masq_domain}${ins_param}#VOLSB-AnyTLS-${i}"
-        ALL_LINKS+=("$link")
+        local link="anytls://${pwd}@${CONNECT_ADDR}:${port}?sni=${masq_domain}${ins_param}#VOLSB-AnyTLS-${i}"
 
         cat >> "$SB_INFO" <<INFO
   [AnyTLS #${i}]
     地址     : ${CONNECT_ADDR}
     端口     : ${port}
-    UUID     : ${uuid}
+    密码     : ${pwd}
     SNI      : ${masq_domain}
     跳过验证 : ${insecure}
     链接     : ${link}

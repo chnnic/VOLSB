@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.4.14
+#   版本   : 1.4.15
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.4.14"
+VOLSB_VER="1.4.15"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -948,7 +948,28 @@ chatgpt.com,
 oaistatic.com,
 oaiusercontent.com,
 claude.ai,
+claude.com,
+clau.de,
+api.anthropic.com,
+cdn.anthropic.com,
+console.anthropic.com,
+mcp.anthropic.com,
+workbench.anthropic.com,
+anthropic.auth0.com,
+anthropic-com.ghost.io,
 anthropic.com,
+anthropic.com.cdn.cloudflare.net,
+claudemcpclient.com,
+claudemcpcontent.com,
+claudeusercontent.com,
+sentry.io,
+statsigapi.net,
+api.statsig.com,
+events.statsigapi.net,
+servd-anthropic-website.b-cdn.net,
+keyword:datadog,
+keyword:sentry,
+keyword:sift,
 perplexity.ai,
 api.perplexity.ai,
 console.perplexity.ai,
@@ -1001,17 +1022,24 @@ _ai_domains_json() {
 
       ($raw | gsub("\n"; ",") | split(",") | map(trim) | map(select(length > 0))) as $items
       | reduce $items[] as $item (
-          {domains: [], suffixes: []};
+          {domains: [], suffixes: [], keywords: []};
           if ($item | ascii_downcase | startswith("geosite:")) then
             ($item | sub("^[Gg][Ee][Oo][Ss][Ii][Tt][Ee]:"; "") | trim | ascii_downcase) as $site
             | if $site == "openai" then
                 .domains += ["openai.com", "chatgpt.com", "oaistatic.com", "oaiusercontent.com"]
                 | .suffixes += [".openai.com", ".chatgpt.com", ".oaistatic.com", ".oaiusercontent.com"]
               elif $site == "anthropic" then
-                .domains += ["anthropic.com", "claude.ai"]
-                | .suffixes += [".anthropic.com", ".claude.ai"]
+                .domains += ["anthropic.com", "api.anthropic.com", "cdn.anthropic.com", "console.anthropic.com", "mcp.anthropic.com", "workbench.anthropic.com", "anthropic.auth0.com", "anthropic-com.ghost.io", "servd-anthropic-website.b-cdn.net", "claude.ai", "claude.com", "clau.de", "claudemcpclient.com", "claudemcpcontent.com", "claudeusercontent.com", "sentry.io", "statsigapi.net", "api.statsig.com", "events.statsigapi.net"]
+                | .suffixes += [".anthropic.com", ".api.anthropic.com", ".cdn.anthropic.com", ".console.anthropic.com", ".mcp.anthropic.com", ".workbench.anthropic.com", ".anthropic.auth0.com", ".anthropic-com.ghost.io", ".servd-anthropic-website.b-cdn.net", ".claude.ai", ".claude.com", ".clau.de", ".claudemcpclient.com", ".claudemcpcontent.com", ".claudeusercontent.com", ".sentry.io", ".statsigapi.net", ".api.statsig.com", ".events.statsigapi.net"]
+                | .keywords += ["datadog", "sentry", "sift"]
               else .
               end
+          elif ($item | ascii_downcase | test("^(keyword|domain_keyword|domain-keyword):")) then
+            ($item
+              | sub("^[Kk][Ee][Yy][Ww][Oo][Rr][Dd]:"; "")
+              | sub("^[Dd][Oo][Mm][Aa][Ii][Nn][_-][Kk][Ee][Yy][Ww][Oo][Rr][Dd]:"; "")
+              | trim | ascii_downcase) as $keyword
+            | if $keyword == "" then . else .keywords += [$keyword] end
           else
             ($item | host) as $domain
             | if $domain == "" then .
@@ -1027,7 +1055,8 @@ _ai_domains_json() {
                 | select([ $suffixes[] as $other | select($other != $s and ($s | endswith($other))) ] | length == 0)
                 | $s
               ]
-          )
+          ),
+          keywords: (.keywords | unique)
         }'
 }
 
@@ -1202,7 +1231,7 @@ build_route_profile_json() {
         return 0
     fi
 
-    local home_out ai_out domains_json domains suffixes split_tags_json split_udp_direct_tags_json split_direct_tags_json direct_tags_json
+    local home_out ai_out domains_json domains suffixes keywords split_tags_json split_udp_direct_tags_json split_direct_tags_json direct_tags_json
     ai_out=$(_ss_outbound_json "$ROUTE_AI_TAG" "$ROUTE_AI_ADDR" "$ROUTE_AI_PORT" "$ROUTE_AI_METHOD" "$ROUTE_AI_PASS") || return 1
     if [[ ${#ROUTE_SPLIT_TAGS[@]} -gt 0 || ${#ROUTE_SPLIT_UDP_DIRECT_TAGS[@]} -gt 0 ]]; then
         home_out=$(_ss_outbound_json "ss-home" "$ROUTE_HOME_ADDR" "$ROUTE_HOME_PORT" "$ROUTE_HOME_METHOD" "$ROUTE_HOME_PASS") || return 1
@@ -1220,6 +1249,7 @@ build_route_profile_json() {
     domains_json=$(_ai_domains_json)
     domains=$(echo "$domains_json" | jq '.domains')
     suffixes=$(echo "$domains_json" | jq '.suffixes')
+    keywords=$(echo "$domains_json" | jq '.keywords')
     if [[ ${#ROUTE_SPLIT_TAGS[@]} -gt 0 ]]; then
         split_tags_json=$(printf '%s\n' "${ROUTE_SPLIT_TAGS[@]}" | jq -R . | jq -s 'unique')
     else
@@ -1246,24 +1276,25 @@ build_route_profile_json() {
         --arg split_direct_final_tag "direct" \
         --argjson domains "$domains" \
         --argjson suffixes "$suffixes" \
+        --argjson keywords "$keywords" \
         --argjson split_tags "$split_tags_json" \
         --argjson split_udp_direct_tags "$split_udp_direct_tags_json" \
         --argjson split_direct_tags "$split_direct_tags_json" \
         --argjson direct_tags "$direct_tags_json" \
         '(if ($split_tags | length) > 0 then [
           {inbound:$split_tags,action:"sniff",timeout:"1s"},
-          {inbound:$split_tags,domain:$domains,domain_suffix:$suffixes,action:"route",outbound:$ai_tag},
+          {inbound:$split_tags,domain:$domains,domain_suffix:$suffixes,domain_keyword:$keywords,action:"route",outbound:$ai_tag},
           {inbound:$split_tags,action:"route",outbound:$final_tag}
         ] else [] end) as $split_ss_rules
         | (if ($split_udp_direct_tags | length) > 0 then [
           {inbound:$split_udp_direct_tags,action:"sniff",timeout:"1s"},
-          {inbound:$split_udp_direct_tags,domain:$domains,domain_suffix:$suffixes,action:"route",outbound:$ai_tag},
+          {inbound:$split_udp_direct_tags,domain:$domains,domain_suffix:$suffixes,domain_keyword:$keywords,action:"route",outbound:$ai_tag},
           {inbound:$split_udp_direct_tags,network:"udp",action:"route",outbound:"direct"},
           {inbound:$split_udp_direct_tags,action:"route",outbound:$final_tag}
         ] else [] end) as $split_udp_direct_rules
         | (if ($split_direct_tags | length) > 0 then [
           {inbound:$split_direct_tags,action:"sniff",timeout:"1s"},
-          {inbound:$split_direct_tags,domain:$domains,domain_suffix:$suffixes,action:"route",outbound:$ai_tag},
+          {inbound:$split_direct_tags,domain:$domains,domain_suffix:$suffixes,domain_keyword:$keywords,action:"route",outbound:$ai_tag},
           {inbound:$split_direct_tags,action:"route",outbound:$split_direct_final_tag}
         ] else [] end) as $split_direct_rules
         | ($direct_tags | length) as $direct_count

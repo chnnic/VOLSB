@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.4.3
+#   版本   : 1.4.4
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.4.3"
+VOLSB_VER="1.4.4"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -340,6 +340,89 @@ acme_issue() {
         --reloadcmd "$(command -v bash) $(readlink -f "$0") restart" \
         || die "证书安装失败 — 请确认: ① 域名已解析到本机 ② 80端口未被占用 ③ acme.sh 中已有该域名证书"
     info "证书已安装: $crt"
+}
+
+select_existing_cert() {
+    local certs=() crt key domain
+    while IFS= read -r crt; do
+        [[ -n "$crt" ]] || continue
+        key="${crt%.crt}.key"
+        [[ -f "$key" ]] || continue
+        certs+=("$crt")
+    done < <(find "$SB_CERT_DIR" -maxdepth 1 -type f -name '*.crt' 2>/dev/null | sort)
+
+    if [[ ${#certs[@]} -eq 0 ]]; then
+        err "未找到可复用证书，请先申请 Let's Encrypt 证书"
+        return 1
+    fi
+
+    echo "" >&2
+    echo "  可复用证书:" >&2
+    local i=1
+    for crt in "${certs[@]}"; do
+        domain=$(basename "$crt" .crt)
+        printf "   %d) %s\n" "$i" "$domain" >&2
+        (( i++ )) || true
+    done
+    echo "   d) 删除旧证书" >&2
+    printf "${C_YELLOW}[?]${NC} 选择证书 [1-${#certs[@]}] / d删除:" >&2
+    read -r cert_choice
+    [[ -z "$cert_choice" ]] && cert_choice="1"
+    if [[ "$cert_choice" == "d" || "$cert_choice" == "D" ]]; then
+        delete_existing_cert || true
+        select_existing_cert
+        return $?
+    fi
+    if ! [[ "$cert_choice" =~ ^[0-9]+$ ]] || (( cert_choice < 1 || cert_choice > ${#certs[@]} )); then
+        err "证书选择无效"
+        return 1
+    fi
+
+    crt="${certs[$(( cert_choice - 1 ))]}"
+    key="${crt%.crt}.key"
+    domain=$(basename "$crt" .crt)
+    printf '%s:%s:%s\n' "$domain" "$crt" "$key"
+}
+
+delete_existing_cert() {
+    local certs=() crt key domain cert_choice confirm
+    while IFS= read -r crt; do
+        [[ -n "$crt" ]] || continue
+        key="${crt%.crt}.key"
+        [[ -f "$key" ]] || continue
+        certs+=("$crt")
+    done < <(find "$SB_CERT_DIR" -maxdepth 1 -type f -name '*.crt' 2>/dev/null | sort)
+
+    if [[ ${#certs[@]} -eq 0 ]]; then
+        warn "没有可删除的本地证书"
+        return 0
+    fi
+
+    echo "" >&2
+    echo "  删除本地证书:" >&2
+    local i=1
+    for crt in "${certs[@]}"; do
+        domain=$(basename "$crt" .crt)
+        printf "   %d) %s\n" "$i" "$domain" >&2
+        (( i++ )) || true
+    done
+    printf "${C_YELLOW}[?]${NC} 选择要删除的证书 [1-${#certs[@]}]，回车取消:" >&2
+    read -r cert_choice
+    [[ -z "$cert_choice" ]] && return 0
+    if ! [[ "$cert_choice" =~ ^[0-9]+$ ]] || (( cert_choice < 1 || cert_choice > ${#certs[@]} )); then
+        err "证书选择无效"
+        return 1
+    fi
+
+    crt="${certs[$(( cert_choice - 1 ))]}"
+    key="${crt%.crt}.key"
+    domain=$(basename "$crt" .crt)
+    printf "${C_YELLOW}[?]${NC} 输入 DELETE 确认删除 %s:" "$domain" >&2
+    read -r confirm
+    [[ "$confirm" == "DELETE" ]] || { warn "已取消删除"; return 0; }
+
+    rm -f -- "$crt" "$key"
+    info "已删除本地证书: ${domain}"
 }
 
 # ════════════════════════════════════════════════════════════
@@ -1241,13 +1324,14 @@ deploy_anytls() {
     fi
 
     echo "  TLS 模式:"
-    echo "   1) 自签证书 (客户端需开 insecure)"
-    echo "   2) Let's Encrypt 正式证书"
-    echo "   3) Reality (无需证书,客户端需支持 AnyTLS + Reality)"
-    ask "选择 [1/2/3] 默认1:"; read -r cchoice
+    echo "   1) 复用已有证书"
+    echo "   2) 自签证书 (客户端需开 insecure)"
+    echo "   3) Let's Encrypt 正式证书"
+    echo "   4) Reality (无需证书,客户端需支持 AnyTLS + Reality)"
+    ask "选择 [1/2/3/4] 默认1:"; read -r cchoice
     [[ -z "$cchoice" ]] && cchoice="1"
 
-    if [[ "$cchoice" == "3" ]]; then
+    if [[ "$cchoice" == "4" ]]; then
         tls_mode="reality"
         insecure="false"
         echo ""
@@ -1258,7 +1342,7 @@ deploy_anytls() {
         local keypair; keypair=$("$SB_BIN" generate reality-keypair)
         reality_priv_key=$(echo "$keypair" | awk '/PrivateKey/{print $2}')
         reality_pub_key=$(echo  "$keypair" | awk '/PublicKey/{print $2}')
-    elif [[ "$cchoice" == "2" ]]; then
+    elif [[ "$cchoice" == "3" ]]; then
         ask "域名:"; read -r masq_domain
         [[ -z "$masq_domain" ]] && { err "域名不能为空"; return 1; }
         acme_issue "$masq_domain"
@@ -1266,11 +1350,20 @@ deploy_anytls() {
         key_path="${SB_CERT_DIR}/${masq_domain}.key"
         insecure="false"
         link_addr="$masq_domain"
-    else
+    elif [[ "$cchoice" == "2" ]]; then
         masq_domain="${CONNECT_ADDR}"
         local pair; pair=$(gen_self_cert "$masq_domain")
         cert_path="${pair%%:*}"; key_path="${pair##*:}"
         link_addr="$CONNECT_ADDR"
+    else
+        local cert_pair; cert_pair=$(select_existing_cert) || return 1
+        masq_domain="${cert_pair%%:*}"
+        local cert_rest="${cert_pair#*:}"
+        cert_path="${cert_rest%%:*}"
+        key_path="${cert_rest#*:}"
+        insecure="false"
+        link_addr="$masq_domain"
+        info "复用证书: ${masq_domain}"
     fi
     [[ -z "$link_addr" ]] && link_addr="$CONNECT_ADDR"
 

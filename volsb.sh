@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.4.2
+#   版本   : 1.4.3
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.4.2"
+VOLSB_VER="1.4.3"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -326,17 +326,19 @@ acme_issue() {
     local crt="${SB_CERT_DIR}/${domain}.crt"
     local key="${SB_CERT_DIR}/${domain}.key"
     [[ -f "$crt" && -f "$key" ]] && { info "证书已存在,跳过申请"; return; }
-    info "申请 Let's Encrypt 证书 (域名: $domain)..."
+    info "申请或复用 Let's Encrypt 证书 (域名: $domain)..."
     svc_stop 2>/dev/null || true
     [[ -f ~/.acme.sh/acme.sh ]] || \
         curl -fsSL https://get.acme.sh | sh -s "email=acme@${domain}" >/dev/null 2>&1 \
         || die "acme.sh 安装失败"
     ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt >/dev/null 2>&1
-    ~/.acme.sh/acme.sh --issue -d "$domain" --standalone -k ec-256 --httpport 80 \
-        || die "证书申请失败 — 请确认: ① 域名已解析到本机 ② 80端口未被占用"
+    if ! ~/.acme.sh/acme.sh --issue -d "$domain" --standalone -k ec-256 --httpport 80; then
+        warn "证书未重新签发，尝试安装 acme.sh 中已有证书..."
+    fi
     ~/.acme.sh/acme.sh --install-cert -d "$domain" --ecc \
         --cert-file "$crt" --key-file "$key" \
-        --reloadcmd "$(command -v bash) $(readlink -f "$0") restart"
+        --reloadcmd "$(command -v bash) $(readlink -f "$0") restart" \
+        || die "证书安装失败 — 请确认: ① 域名已解析到本机 ② 80端口未被占用 ③ acme.sh 中已有该域名证书"
     info "证书已安装: $crt"
 }
 

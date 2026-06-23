@@ -11,7 +11,7 @@
     ╚═══╝   ╚═════╝ ╚══════╝╚══════╝╚═════╝
 ```
 
-[![Version](https://img.shields.io/badge/version-1.4.2-blue.svg)](https://github.com/chnnic/VOLSB)
+[![Version](https://img.shields.io/badge/version-1.4.3-blue.svg)](https://github.com/chnnic/VOLSB)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![sing-box](https://img.shields.io/badge/sing--box-1.13.13-orange.svg)](https://github.com/SagerNet/sing-box)
 
@@ -105,7 +105,7 @@ volsb uninstall      # 完全卸载
 ```
   ██╗   ██╗ ██████╗ ██╗     ███████╗██████╗
   ...
-  v1.4.2  |  2026-06-23 18:00:00
+  v1.4.3  |  2026-06-23 18:00:00
 
   状态: ● 运行中
   版本: 1.13.13
@@ -169,6 +169,7 @@ volsb uninstall      # 完全卸载
 - 分流节点会自动添加 `action: sniff` 路由规则，用于识别 TLS/HTTP 目标域名并命中 AI 规则
 - AnyTLS 可选择 Reality 模式，无需证书，并会生成 `pbk` / `sid` 分享参数
 - AnyTLS 证书模式会生成带 SAN 的自签证书；Let's Encrypt 模式会用证书域名生成连接地址
+- Let's Encrypt 未到续期时间时会复用并安装 acme.sh 中已有证书
 
 分流模式会要求填写两个 Shadowsocks 链接：
 

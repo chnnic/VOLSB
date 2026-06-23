@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.4.10
+#   版本   : 1.4.11
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.4.10"
+VOLSB_VER="1.4.11"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -503,6 +503,8 @@ ROUTE_OUTBOUNDS_JSON=""
 ROUTE_CONFIG_JSON=""
 ROUTE_AI_ITEMS=""
 ROUTE_SS_CONFIGURED=false
+ROUTE_BASE_OUTBOUNDS_JSON=""
+ROUTE_BASE_ROUTE_JSON=""
 declare -a ROUTE_DIRECT_TAGS=()
 declare -a ROUTE_SPLIT_TAGS=()
 declare -a ROUTE_SPLIT_DIRECT_TAGS=()
@@ -1035,6 +1037,8 @@ reset_route_profile() {
     ROUTE_AI_TAG="ss-ai"
     ROUTE_AI_ITEMS=""
     ROUTE_SS_CONFIGURED=false
+    ROUTE_BASE_OUTBOUNDS_JSON=""
+    ROUTE_BASE_ROUTE_JSON=""
     ROUTE_DIRECT_TAGS=()
     ROUTE_SPLIT_TAGS=()
     ROUTE_SPLIT_DIRECT_TAGS=()
@@ -1227,6 +1231,29 @@ build_route_profile_json() {
         | ($direct_tags | length) as $direct_count
         | {rules:($split_ss_rules + $split_direct_rules + (if $direct_count > 0 then [{inbound:$direct_tags,action:"route",outbound:"direct"}] else [] end)),
            final:"direct"}')
+}
+
+merge_route_profile_json() {
+    [[ -n "$ROUTE_BASE_OUTBOUNDS_JSON" && -n "$ROUTE_BASE_ROUTE_JSON" ]] || return 0
+
+    ROUTE_OUTBOUNDS_JSON=$(jq -n \
+        --argjson old "$ROUTE_BASE_OUTBOUNDS_JSON" \
+        --argjson new "$ROUTE_OUTBOUNDS_JSON" \
+        'reduce (($old // []) + ($new // []))[] as $out ([];
+          ($out.tag // "") as $tag
+          | if $tag == "" then . + [$out]
+            else [ .[] | select((.tag // "") != $tag) ] + [$out]
+            end
+        )') || return 1
+
+    ROUTE_CONFIG_JSON=$(jq -n \
+        --argjson old "$ROUTE_BASE_ROUTE_JSON" \
+        --argjson new "$ROUTE_CONFIG_JSON" \
+        '($old // {}) as $old_route
+        | ($new // {}) as $new_route
+        | $old_route + $new_route
+        | .rules = (($old_route.rules // []) + ($new_route.rules // []))
+        | .final = ($new_route.final // $old_route.final // "direct")') || return 1
 }
 
 # ════════════════════════════════════════════════════════════
@@ -1621,6 +1648,7 @@ _write_config() {
     # $1 = inbounds JSON array string
     local inbounds_json="$1"
     build_route_profile_json || return 1
+    merge_route_profile_json || return 1
     step "写入配置文件"
     cat > "$SB_CONFIG" <<JSON
 {
@@ -1739,9 +1767,13 @@ append_and_write_config() {
         # 跳过头部（前5行），保留节点详情
         old_info_body=$(tail -n +6 "$SB_INFO" 2>/dev/null || true)
     fi
+    reset_route_profile
+    if $keep_old && [[ -f "$SB_CONFIG" ]]; then
+        ROUTE_BASE_OUTBOUNDS_JSON=$(jq '.outbounds // []' "$SB_CONFIG" 2>/dev/null || echo "[]")
+        ROUTE_BASE_ROUTE_JSON=$(jq '.route // {"final":"direct"}' "$SB_CONFIG" 2>/dev/null || echo '{"final":"direct"}')
+    fi
     _init_info_header
     [[ -n "$old_info_body" ]] && echo "$old_info_body" >> "$SB_INFO"
-    reset_route_profile
 
     # 部署新协议
     for proto in "${SELECTED_PROTOS[@]}"; do

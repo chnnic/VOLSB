@@ -11,7 +11,7 @@
     ╚═══╝   ╚═════╝ ╚══════╝╚══════╝╚═════╝
 ```
 
-[![Version](https://img.shields.io/badge/version-1.4.8-blue.svg)](https://github.com/chnnic/VOLSB)
+[![Version](https://img.shields.io/badge/version-1.4.9-blue.svg)](https://github.com/chnnic/VOLSB)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![sing-box](https://img.shields.io/badge/sing--box-1.13.13-orange.svg)](https://github.com/SagerNet/sing-box)
 
@@ -37,6 +37,7 @@ VOLSB 是一个功能完整的 **sing-box 服务端** 一键部署脚本，支�
 | 自定义连接地址 | 自动检测公网 IP 或手动输入 IP/DDNS 域名 |
 | 分享链接 | 自动生成标准分享链接，支持二维码输出 |
 | 追加协议 | 可在不删除旧节点的情况下追加新协议 |
+| 删除节点 | 可按入站节点删除，并同步清理路由规则与分享链接 |
 
 ### 🔗 线路机（中转机）
 
@@ -105,11 +106,11 @@ volsb uninstall      # 完全卸载
 ```
   ██╗   ██╗ ██████╗ ██╗     ███████╗██████╗
   ...
-  v1.4.8  |  2026-06-24 01:40:00
+  v1.4.9  |  2026-06-24 02:10:00
 
   状态: ● 运行中
   版本: 1.13.13
-  节点: 6 条链接
+  节点: 3 个入站 / 6 条链接
   ────────────────────────────────────────────
   📦 安装管理
    1) 全新安装 / 重新部署
@@ -121,7 +122,7 @@ volsb uninstall      # 完全卸载
    5) 启动    6) 停止    7) 重启    8) 查看状态
 
   📋 节点与配置
-   9) 查看节点信息 & 分享链接
+   9) 查看节点信息 / 删除节点
   10) 重置端口 / 密码 / UUID
   11) 编辑配置文件
 

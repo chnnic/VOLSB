@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.4.8
+#   版本   : 1.4.9
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.4.8"
+VOLSB_VER="1.4.9"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -2419,6 +2419,128 @@ HDR
     echo ""
 }
 
+count_active_inbounds() {
+    [[ -f "$SB_CONFIG" ]] || { echo 0; return 0; }
+    jq '[.inbounds[]? | select((.listen // "") != "127.0.0.1")] | length' "$SB_CONFIG" 2>/dev/null || echo 0
+}
+
+count_saved_links() {
+    [[ -f "$SB_LINKS" ]] || { echo 0; return 0; }
+    awk 'NF{n++} END{print n+0}' "$SB_LINKS" 2>/dev/null || echo 0
+}
+
+_clean_info_blocks_by_port() {
+    local port="$1" tmp
+    tmp=$(mktemp)
+    awk -v port="$port" '
+        function flush_block(    keep) {
+            if (block == "") return
+            keep = 1
+            if (block ~ ("端口[[:space:]]*:[[:space:]]*" port "([^0-9]|$)")) keep = 0
+            if (block ~ ("ShadowTLS 端口[[:space:]]*:[[:space:]]*" port "([^0-9]|$)")) keep = 0
+            if (keep) printf "%s", block
+            block = ""
+        }
+        /^  \[/ {
+            flush_block()
+            block = $0 ORS
+            next
+        }
+        {
+            block = block $0 ORS
+        }
+        END {
+            flush_block()
+        }
+    ' "$SB_INFO" > "$tmp" && mv "$tmp" "$SB_INFO" || { rm -f "$tmp"; return 1; }
+}
+
+delete_node() {
+    require_root
+    [[ -f "$SB_CONFIG" ]] || { warn "未找到配置文件"; return; }
+
+    local items_json
+    items_json=$(jq -c '[.inbounds[]? | select((.listen // "") != "127.0.0.1") | {tag:(.tag//""),type:(.type//""),port:(.listen_port//0),listen:(.listen//""),detour:(.detour//null)}]' "$SB_CONFIG" 2>/dev/null) || {
+        warn "无法读取当前节点列表"; return 1
+    }
+
+    local item_count
+    item_count=$(echo "$items_json" | jq 'length' 2>/dev/null || echo 0)
+    if [[ "$item_count" -le 0 ]]; then
+        warn "没有可删除的节点"
+        return 0
+    fi
+
+    echo ""
+    echo -e "  ${C_BOLD}可删除节点:${NC}"
+    echo "$items_json" | jq -r '
+        to_entries[]
+        | "  \(.key + 1)) \(.value.type) 端口:\(.value.port) [\(.value.tag)]\(.value.detour // "" | if . == "" then "" else " -> detour:" + . end)"
+    '
+    echo ""
+    ask "输入要删除的节点序号,回车取消:"; read -r del_idx
+    [[ -z "$del_idx" ]] && { info "已取消"; return 0; }
+    [[ "$del_idx" =~ ^[0-9]+$ ]] || { warn "请输入有效序号"; return 1; }
+    (( del_idx >= 1 && del_idx <= item_count )) || { warn "序号超出范围"; return 1; }
+
+    local target
+    target=$(echo "$items_json" | jq -c ".[$((del_idx - 1))]") || return 1
+    local target_tag target_port target_detour
+    target_tag=$(echo "$target" | jq -r '.tag')
+    target_port=$(echo "$target" | jq -r '.port')
+    target_detour=$(echo "$target" | jq -r '.detour // empty')
+
+    echo ""
+    echo -e "  将删除: ${C_YELLOW}${target_tag}${NC} 端口 ${C_CYAN}${target_port}${NC}"
+    [[ -n "$target_detour" ]] && echo -e "  同时删除 detour 后端: ${C_YELLOW}${target_detour}${NC}"
+    ask "输入 DELETE 确认删除:"; read -r confirm
+    [[ "$confirm" == "DELETE" ]] || { info "已取消删除"; return 0; }
+
+    local tags_json
+    if [[ -n "$target_detour" ]]; then
+        tags_json=$(printf '%s\n%s\n' "$target_tag" "$target_detour" | jq -R . | jq -s 'unique')
+    else
+        tags_json=$(printf '%s\n' "$target_tag" | jq -R . | jq -s 'unique')
+    fi
+
+    local tmp_config
+    tmp_config=$(mktemp)
+    jq --argjson tags "$tags_json" '
+        def tag_hit($x): any($tags[]; . == $x);
+        def drop_empty_inbound:
+          if (.inbound? | type) == "array" then
+            .inbound = [ .inbound[] | select(tag_hit(.) | not) ]
+          elif (.inbound? | type) == "string" and tag_hit(.inbound) then
+            .__drop = true
+          else
+            .
+          end;
+        .inbounds = [ .inbounds[]? | select(tag_hit((.tag // "")) | not) ]
+        | .route.rules = (
+            [.route.rules[]? | drop_empty_inbound]
+            | map(select((.__drop // false) | not))
+            | map(select((.inbound? | type) != "array" or (.inbound | length) > 0))
+          )
+      ' "$SB_CONFIG" > "$tmp_config" || { rm -f "$tmp_config"; warn "删除节点失败"; return 1; }
+
+    if ! "$SB_BIN" check -c "$tmp_config" >/dev/null 2>&1; then
+        err "删除后配置校验失败，已放弃修改"
+        "$SB_BIN" check -c "$tmp_config" || true
+        rm -f "$tmp_config"
+        return 1
+    fi
+
+    mv "$tmp_config" "$SB_CONFIG"
+    local tmp_links
+    tmp_links=$(mktemp)
+    awk -v port="$target_port" 'index($0, ":" port) == 0' "$SB_LINKS" 2>/dev/null > "$tmp_links" || true
+    mv "$tmp_links" "$SB_LINKS"
+    _clean_info_blocks_by_port "$target_port" || warn "节点信息文件更新失败，已继续"
+
+    svc_restart || { err "配置已更新，但服务重启失败"; return 1; }
+    info "已删除节点 ${target_tag}"
+}
+
 # ════════════════════════════════════════════════════════════
 #  端口 & 密码重置
 # ════════════════════════════════════════════════════════════
@@ -2775,8 +2897,12 @@ LOGO
         fi
         [[ -x "$SB_BIN" ]] && \
             echo -e "  版本: ${C_DIM}$("$SB_BIN" version 2>/dev/null | awk '{print $3}' | head -1)${NC}"
-        [[ -f "$SB_LINKS" ]] && \
-            echo -e "  节点: ${C_DIM}$(wc -l < "$SB_LINKS") 条链接${NC}"
+        if [[ -f "$SB_CONFIG" || -f "$SB_LINKS" ]]; then
+            local node_count link_count
+            node_count=$(count_active_inbounds)
+            link_count=$(count_saved_links)
+            echo -e "  节点: ${C_DIM}${node_count} 个入站 / ${link_count} 条链接${NC}"
+        fi
 
         echo ""; hr
         echo -e "  ${C_BOLD}📦 安装管理${NC}"
@@ -2789,7 +2915,7 @@ LOGO
         echo "   5) 启动    6) 停止    7) 重启    8) 查看状态"
         echo ""
         echo -e "  ${C_BOLD}📋 节点与配置${NC}"
-        echo "   9) 查看节点信息 & 分享链接"
+        echo "   9) 查看节点信息 / 删除节点"
         echo "  10) 重置端口 / 密码 / UUID"
         echo "  11) 编辑配置文件"
         echo ""
@@ -2804,7 +2930,7 @@ LOGO
         hr
         echo "   0) 退出"
         echo ""
-        ask "请选择 [0-14]:"; read -r opt
+        ask "请选择 [0-16]:"; read -r opt
 
         case "$opt" in
             1)  do_install || true ;;
@@ -2820,7 +2946,16 @@ LOGO
             6)  require_root; svc_stop   && info "已停止" || true ;;
             7)  require_root; svc_restart && info "已重启" || true ;;
             8)  svc_status || true ;;
-            9)  show_nodes || true ;;
+            9)  show_nodes || true
+                echo ""
+                echo -e "  ${C_BOLD}节点管理${NC}"
+                echo "   1) 删除节点"
+                echo "   0) 返回"
+                ask "请选择 [0/1]:"; read -r node_opt
+                case "$node_opt" in
+                    1) delete_node || true ;;
+                    *) : ;;
+                esac ;;
             10) reset_ports || true ;;
             11) require_root; ${EDITOR:-vi} "$SB_CONFIG"
                 "$SB_BIN" check -c "$SB_CONFIG" &>/dev/null && {

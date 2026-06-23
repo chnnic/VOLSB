@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.4.4
+#   版本   : 1.4.5
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.4.4"
+VOLSB_VER="1.4.5"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -344,6 +344,9 @@ acme_issue() {
 
 select_existing_cert() {
     local certs=() crt key domain
+    SELECTED_CERT_DOMAIN=""
+    SELECTED_CERT_PATH=""
+    SELECTED_CERT_KEY_PATH=""
     while IFS= read -r crt; do
         [[ -n "$crt" ]] || continue
         key="${crt%.crt}.key"
@@ -381,7 +384,9 @@ select_existing_cert() {
     crt="${certs[$(( cert_choice - 1 ))]}"
     key="${crt%.crt}.key"
     domain=$(basename "$crt" .crt)
-    printf '%s:%s:%s\n' "$domain" "$crt" "$key"
+    SELECTED_CERT_DOMAIN="$domain"
+    SELECTED_CERT_PATH="$crt"
+    SELECTED_CERT_KEY_PATH="$key"
 }
 
 delete_existing_cert() {
@@ -454,6 +459,9 @@ ROUTE_AI_ITEMS=""
 ROUTE_SS_CONFIGURED=false
 declare -a ROUTE_DIRECT_TAGS=()
 declare -a ROUTE_SPLIT_TAGS=()
+SELECTED_CERT_DOMAIN=""
+SELECTED_CERT_PATH=""
+SELECTED_CERT_KEY_PATH=""
 
 # ────── 公共参数收集:连接IP/域名 ──────
 ask_connect_addr() {
@@ -1356,11 +1364,14 @@ deploy_anytls() {
         cert_path="${pair%%:*}"; key_path="${pair##*:}"
         link_addr="$CONNECT_ADDR"
     else
-        local cert_pair; cert_pair=$(select_existing_cert) || return 1
-        masq_domain="${cert_pair%%:*}"
-        local cert_rest="${cert_pair#*:}"
-        cert_path="${cert_rest%%:*}"
-        key_path="${cert_rest#*:}"
+        select_existing_cert || return 1
+        masq_domain="$SELECTED_CERT_DOMAIN"
+        cert_path="$SELECTED_CERT_PATH"
+        key_path="$SELECTED_CERT_KEY_PATH"
+        if [[ -z "$masq_domain" || -z "$cert_path" || -z "$key_path" ]]; then
+            err "证书选择失败，请重新选择"
+            return 1
+        fi
         insecure="false"
         link_addr="$masq_domain"
         info "复用证书: ${masq_domain}"
@@ -1544,12 +1555,12 @@ assemble_and_write_config() {
 
     for proto in "${SELECTED_PROTOS[@]}"; do
         case "$proto" in
-            vless_reality) deploy_vless_reality ;;
-            hysteria2)     deploy_hysteria2 ;;
-            vmess_ws)      deploy_vmess_ws ;;
-            trojan)        deploy_trojan ;;
-            shadowtls)     deploy_shadowtls ;;
-            anytls)        deploy_anytls ;;
+            vless_reality) deploy_vless_reality || return 1 ;;
+            hysteria2)     deploy_hysteria2 || return 1 ;;
+            vmess_ws)      deploy_vmess_ws || return 1 ;;
+            trojan)        deploy_trojan || return 1 ;;
+            shadowtls)     deploy_shadowtls || return 1 ;;
+            anytls)        deploy_anytls || return 1 ;;
         esac
     done
 
@@ -1624,12 +1635,12 @@ append_and_write_config() {
     # 部署新协议
     for proto in "${SELECTED_PROTOS[@]}"; do
         case "$proto" in
-            vless_reality) deploy_vless_reality ;;
-            hysteria2)     deploy_hysteria2 ;;
-            vmess_ws)      deploy_vmess_ws ;;
-            trojan)        deploy_trojan ;;
-            shadowtls)     deploy_shadowtls ;;
-            anytls)        deploy_anytls ;;
+            vless_reality) deploy_vless_reality || return 1 ;;
+            hysteria2)     deploy_hysteria2 || return 1 ;;
+            vmess_ws)      deploy_vmess_ws || return 1 ;;
+            trojan)        deploy_trojan || return 1 ;;
+            shadowtls)     deploy_shadowtls || return 1 ;;
+            anytls)        deploy_anytls || return 1 ;;
         esac
     done
 
@@ -2451,13 +2462,13 @@ do_install() {
 
     if [[ "$DEPLOY_MODE" == "2" ]]; then
         # 线路机模式
-        deploy_relay
-        assemble_relay_check
+        deploy_relay || return 1
+        assemble_relay_check || return 1
     else
         # 部署机模式
         ask_connect_addr
         select_protocols
-        assemble_and_write_config
+        assemble_and_write_config || return 1
     fi
 
     step "启动 sing-box 服务"
@@ -2703,8 +2714,11 @@ LOGO
         case "$opt" in
             1)  do_install || true ;;
             2)  require_root; ask_connect_addr; select_protocols
-                append_and_write_config || true
-                svc_restart && { info "配置已更新"; show_nodes; } || true ;;
+                if append_and_write_config; then
+                    svc_restart && { info "配置已更新"; show_nodes; } || true
+                else
+                    err "配置未更新，请根据上方错误重新操作"
+                fi ;;
             3)  do_update_menu || true ;;
             4)  do_uninstall || true ;;
             5)  require_root; svc_start  && info "已启动" || true ;;
@@ -2794,7 +2808,8 @@ main() {
 HDR
             parse_relay_args "$@"
             ask_connect_addr
-            deploy_relay; assemble_relay_check
+            deploy_relay || exit 1
+            assemble_relay_check || exit 1
             svc_start; sleep 2
             svc_active && info "线路机运行中 ✔" || { err "启动失败"; exit 1; }
             show_nodes
@@ -2802,8 +2817,12 @@ HDR
         add)
             require_root
             [[ -f "$SB_CONFIG" ]] || die "请先安装"
-            ask_connect_addr; select_protocols; append_and_write_config
-            svc_restart && { info "已更新并重启"; show_nodes; } ;;
+            ask_connect_addr; select_protocols
+            if append_and_write_config; then
+                svc_restart && { info "已更新并重启"; show_nodes; }
+            else
+                err "配置未更新，请根据上方错误重新操作"
+            fi ;;
         update|upgrade)   do_update_singbox ;;
         self-update)      do_update_script ;;
         sync-time)        sync_time ;;

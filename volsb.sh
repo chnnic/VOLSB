@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.4.1
+#   版本   : 1.4.2
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.4.1"
+VOLSB_VER="1.4.2"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -273,12 +273,21 @@ gen_self_cert() {
     local cn="${1:-bing.com}"
     local crt="${SB_CERT_DIR}/${cn}.crt"
     local key="${SB_CERT_DIR}/${cn}.key"
-    if [[ ! -f "$crt" ]]; then
-        openssl ecparam -genkey -name prime256v1 -out "$key" 2>/dev/null
+    local san_type="DNS"
+    [[ "$cn" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && san_type="IP"
+
+    openssl ecparam -genkey -name prime256v1 -out "$key" 2>/dev/null
+    if ! openssl req -new -x509 -days 36500 -key "$key" -out "$crt" \
+        -subj "/CN=${cn}" -addext "subjectAltName = ${san_type}:${cn}" 2>/dev/null; then
+        local ext_file; ext_file=$(mktemp)
+        cat > "$ext_file" <<EOF
+subjectAltName = ${san_type}:${cn}
+EOF
         openssl req -new -x509 -days 36500 -key "$key" -out "$crt" \
-            -subj "/CN=${cn}" 2>/dev/null
-        chmod 600 "$key"
+            -subj "/CN=${cn}" -extfile "$ext_file" 2>/dev/null
+        rm -f "$ext_file"
     fi
+    chmod 600 "$key"
     echo "${crt}:${key}"
 }
 
@@ -1219,7 +1228,7 @@ JSON
 deploy_anytls() {
     step "配置 AnyTLS"
 
-    local port cert_path key_path masq_domain insecure="true" tls_mode="cert"
+    local port cert_path key_path masq_domain insecure="true" tls_mode="cert" link_addr=""
     local reality_priv_key="" reality_pub_key="" reality_short_ids_json="[]"
 
     if [[ -n "${VOLSB_PORT:-}" ]]; then
@@ -1254,11 +1263,14 @@ deploy_anytls() {
         cert_path="${SB_CERT_DIR}/${masq_domain}.crt"
         key_path="${SB_CERT_DIR}/${masq_domain}.key"
         insecure="false"
+        link_addr="$masq_domain"
     else
         masq_domain="${CONNECT_ADDR}"
         local pair; pair=$(gen_self_cert "$masq_domain")
         cert_path="${pair%%:*}"; key_path="${pair##*:}"
+        link_addr="$CONNECT_ADDR"
     fi
+    [[ -z "$link_addr" ]] && link_addr="$CONNECT_ADDR"
 
     ask_multi_user_count; local user_count="$USER_COUNT"
     local users_json="["; local idx=0
@@ -1282,10 +1294,11 @@ deploy_anytls() {
         local ins_param=""
         if [[ "$tls_mode" == "reality" ]]; then
             ins_param="&security=reality&fp=chrome&pbk=${reality_pub_key}&sid=${short_id}&type=tcp"
-        elif [[ "$insecure" == "true" ]]; then
-            ins_param="&insecure=1"
+        else
+            ins_param="&security=tls&type=tcp"
+            [[ "$insecure" == "true" ]] && ins_param+="&insecure=1"
         fi
-        local link="anytls://${pwd}@${CONNECT_ADDR}:${port}?sni=${masq_domain}${ins_param}#VOLSB-AnyTLS-${i}"
+        local link="anytls://${pwd}@${link_addr}:${port}?sni=${masq_domain}${ins_param}#VOLSB-AnyTLS-${i}"
         ALL_LINKS+=("$link")
         local reality_info=""
         if [[ "$tls_mode" == "reality" ]]; then
@@ -1297,6 +1310,7 @@ deploy_anytls() {
         cat >> "$SB_INFO" <<INFO
   [AnyTLS #${i}]
     地址     : ${CONNECT_ADDR}
+    连接地址 : ${link_addr}
     端口     : ${port}
     密码     : ${pwd}
     SNI      : ${masq_domain}

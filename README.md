@@ -11,7 +11,7 @@
     ╚═══╝   ╚═════╝ ╚══════╝╚══════╝╚═════╝
 ```
 
-[![Version](https://img.shields.io/badge/version-1.4.7-blue.svg)](https://github.com/chnnic/VOLSB)
+[![Version](https://img.shields.io/badge/version-1.4.8-blue.svg)](https://github.com/chnnic/VOLSB)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![sing-box](https://img.shields.io/badge/sing--box-1.13.13-orange.svg)](https://github.com/SagerNet/sing-box)
 
@@ -32,7 +32,7 @@ VOLSB 是一个功能完整的 **sing-box 服务端** 一键部署脚本，支�
 | 一键安装 | 自动下载 sing-box 最新版并部署 |
 | 多协议支持 | VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS v3 / AnyTLS |
 | 多节点生成 | 每个协议支持同时生成 1-10 个节点（独立 UUID/密码） |
-| 按节点出口 | 每个入站节点组可选择 VPS 直连或 AI 分流 + SS 家宽出口 |
+| 按节点出口 | 每个入站节点组可选择 VPS 直连、AI 分流 + SS 家宽出口，或 AI 分流 + VPS 直连 |
 | 自动生成密钥 | Reality 密钥对、UUID、ShortID 全自动生成 |
 | 自定义连接地址 | 自动检测公网 IP 或手动输入 IP/DDNS 域名 |
 | 分享链接 | 自动生成标准分享链接，支持二维码输出 |
@@ -105,7 +105,7 @@ volsb uninstall      # 完全卸载
 ```
   ██╗   ██╗ ██████╗ ██╗     ███████╗██████╗
   ...
-  v1.4.7  |  2026-06-23 18:00:00
+  v1.4.8  |  2026-06-24 01:40:00
 
   状态: ● 运行中
   版本: 1.13.13
@@ -160,12 +160,14 @@ volsb uninstall      # 完全卸载
 节点出口模式: VLESS-Reality
  1) 直连 VPS 出口
  2) AI → ss-ai，其余 → ss-home
+ 3) AI → ss-ai，其余 → 直连 VPS 出口
 ```
 
 如果需要一条链接一个出口策略，建议每次生成节点数量填 `1`，再通过菜单 **2) 追加新协议** 一条条生成。这样可以同时保留：
 
 - 直连节点：所有流量走 VPS 本地出口
 - 分流节点：AI 流量走 `ss-ai`，其他流量走 `ss-home`
+- AI 转发节点：AI 流量走 `ss-ai`，其他流量走 VPS 本地出口
 - 分流节点会自动添加 `action: sniff` 路由规则，用于识别 TLS/HTTP 目标域名并命中 AI 规则
 - AnyTLS 可选择 Reality 模式，无需证书，并会生成 `pbk` / `sid` 分享参数
 - AnyTLS 证书模式会生成带 SAN 的自签证书；Let's Encrypt 模式会用证书域名生成连接地址
@@ -173,11 +175,18 @@ volsb uninstall      # 完全卸载
 - AnyTLS 可先选择“复用已有证书”，再从本地或 acme.sh 证书列表中选择具体域名；证书列表支持按 `d` 删除旧证书
 - 追加协议失败时不会写入空配置，也不会继续重启服务
 
-分流模式会要求填写两个 Shadowsocks 链接：
+`AI → ss-ai，其余 → ss-home` 会要求填写两个 Shadowsocks 链接：
 
 ```text
 AI 日本家宽 SS 链接     -> 出站 tag: ss-ai
 香港家宽默认出口 SS 链接 -> 出站 tag: ss-home
+```
+
+`AI → ss-ai，其余 → 直连 VPS 出口` 只需要填写 AI Shadowsocks 链接：
+
+```text
+AI 日本家宽 SS 链接     -> 出站 tag: ss-ai
+其他流量               -> 出站 tag: direct
 ```
 
 内置 AI 规则会自动转换为 sing-box 可用字段：
@@ -277,20 +286,33 @@ volsb sync-time
 支持通过环境变量跳过交互，适合 CI/CD 或批量部署场景：
 
 ```bash
-VOLSB_MODE=1 \          # 1=部署机 2=线路机
-VOLSB_PROTO="1 2" \     # 协议选择（1=VLESS 2=HY2，0=全部）
-VOLSB_IP=1.2.3.4 \      # 指定连接地址
-VOLSB_PORT=443 \        # 指定入站端口
-VOLSB_SNI=www.cloudflare.com \  # 指定 Reality SNI
+# VOLSB_MODE: 1=部署机, 2=线路机
+# VOLSB_PROTO: 1=VLESS, 2=HY2, 0=全部
+VOLSB_MODE=1 \
+VOLSB_PROTO="1 2" \
+VOLSB_IP=1.2.3.4 \
+VOLSB_PORT=443 \
+VOLSB_SNI=www.cloudflare.com \
 bash volsb.sh install
 ```
 
 分流相关环境变量：
 
 ```bash
-VOLSB_ROUTE_MODE=ai-ss \        # 当前生成的入站节点组使用 AI 分流
-VOLSB_AI_SS='ss://...' \        # AI 出站，tag: ss-ai
-VOLSB_HOME_SS='ss://...' \      # 默认家宽出站，tag: ss-home
+# AI -> ss-ai，其余 -> ss-home
+VOLSB_ROUTE_MODE=ai-ss \
+VOLSB_AI_SS='ss://...' \
+VOLSB_HOME_SS='ss://...' \
+VOLSB_AI_EXTRA='https://new.ai/path,geosite:customai' \
+bash volsb.sh install
+```
+
+如果只想让 AI 走 SS，其他流量仍走 VPS 直连：
+
+```bash
+# AI -> ss-ai，其余 -> direct
+VOLSB_ROUTE_MODE=ai-direct \
+VOLSB_AI_SS='ss://...' \
 VOLSB_AI_EXTRA='https://new.ai/path,geosite:customai' \
 bash volsb.sh install
 ```

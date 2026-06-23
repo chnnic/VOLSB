@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.3.8
+#   版本   : 1.3.9
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.3.8"
+VOLSB_VER="1.3.9"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -488,6 +488,7 @@ INFO
         --arg     priv_key  "$priv_key" \
         --argjson short_ids "$short_ids_json" \
         '{type:"vless",tag:"vless-reality-in",listen:"::",listen_port:$port,
+           sniff:true,sniff_override_destination:true,
            users:$users,tls:{enabled:true,server_name:$sni,
            reality:{enabled:true,handshake:{server:$sni,server_port:443},
            private_key:$priv_key,short_id:$short_ids}}}')
@@ -550,6 +551,7 @@ INFO
         --arg     cert  "$cert_path" \
         --arg     key   "$key_path" \
         '{type:"hysteria2",tag:"hysteria2-in",listen:"::",listen_port:$port,
+           sniff:true,sniff_override_destination:true,
            users:$users,tls:{enabled:true,alpn:["h3"],
            certificate_path:$cert,key_path:$key}}')
     ALL_INBOUNDS+=("$inbound")
@@ -596,6 +598,7 @@ INFO
         --argjson users "$users_json" \
         --arg     path  "$ws_path" \
         '{type:"vmess",tag:"vmess-ws-in",listen:"::",listen_port:$port,
+           sniff:true,sniff_override_destination:true,
            users:$users,transport:{type:"ws",path:$path}}')
     ALL_INBOUNDS+=("$inbound")
     ask_inbound_route_mode "vmess-ws-in" "VMess-WS" || return 1
@@ -652,6 +655,7 @@ INFO
         --arg     cert  "$cert_path" \
         --arg     key   "$key_path" \
         '{type:"trojan",tag:"trojan-in",listen:"::",listen_port:$port,
+           sniff:true,sniff_override_destination:true,
            users:$users,tls:{enabled:true,certificate_path:$cert,key_path:$key}}')
     ALL_INBOUNDS+=("$inbound")
     ask_inbound_route_mode "trojan-in" "Trojan" || return 1
@@ -699,6 +703,7 @@ INFO
         --argjson users "$stls_users" \
         --arg     sni   "$sni" \
         '{type:"shadowtls",tag:"shadowtls-in",listen:"::",listen_port:$port,
+           sniff:true,sniff_override_destination:true,
            version:3,users:$users,handshake:{server:$sni,server_port:443},
            detour:"ss-backend-in"}')
     ss_inbound=$(jq -n \
@@ -1273,6 +1278,7 @@ INFO
 
     local inbound
     inbound=$(jq -n         --argjson port  "$port"         --argjson users "$users_json"         --arg     cert  "$cert_path"         --arg     key   "$key_path"         '{type:"anytls",tag:"anytls-in",listen:"::",listen_port:$port,
+           sniff:true,sniff_override_destination:true,
            users:$users,tls:{enabled:true,certificate_path:$cert,key_path:$key}}')
     ALL_INBOUNDS+=("$inbound")
     ask_inbound_route_mode "anytls-in" "AnyTLS" || return 1

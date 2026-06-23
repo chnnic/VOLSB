@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.4.6
+#   版本   : 1.4.7
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.4.6"
+VOLSB_VER="1.4.7"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -354,17 +354,39 @@ acme_issue() {
     acme_install_cert "$domain"
 }
 
+collect_reusable_cert_domains() {
+    local crt domain dir
+    {
+        find "$SB_CERT_DIR" -maxdepth 1 -type f -name '*.crt' 2>/dev/null \
+            | while IFS= read -r crt; do
+                [[ -f "${crt%.crt}.key" ]] || continue
+                basename "$crt" .crt
+            done
+
+        if [[ -d "$HOME/.acme.sh" ]]; then
+            find "$HOME/.acme.sh" -maxdepth 1 -type d 2>/dev/null \
+                | while IFS= read -r dir; do
+                    domain=$(basename "$dir")
+                    case "$domain" in
+                        *_ecc) domain="${domain%_ecc}" ;;
+                        *) continue ;;
+                    esac
+                    [[ -f "$dir/${domain}.cer" || -f "$dir/fullchain.cer" ]] || continue
+                    printf '%s\n' "$domain"
+                done
+        fi
+    } | sort -u
+}
+
 select_existing_cert() {
     local certs=() crt key domain
     SELECTED_CERT_DOMAIN=""
     SELECTED_CERT_PATH=""
     SELECTED_CERT_KEY_PATH=""
-    while IFS= read -r crt; do
-        [[ -n "$crt" ]] || continue
-        key="${crt%.crt}.key"
-        [[ -f "$key" ]] || continue
-        certs+=("$crt")
-    done < <(find "$SB_CERT_DIR" -maxdepth 1 -type f -name '*.crt' 2>/dev/null | sort)
+    while IFS= read -r domain; do
+        [[ -n "$domain" ]] || continue
+        certs+=("$domain")
+    done < <(collect_reusable_cert_domains)
 
     if [[ ${#certs[@]} -eq 0 ]]; then
         err "未找到可复用证书，请先申请 Let's Encrypt 证书"
@@ -374,8 +396,7 @@ select_existing_cert() {
     echo "" >&2
     echo "  可复用证书:" >&2
     local i=1
-    for crt in "${certs[@]}"; do
-        domain=$(basename "$crt" .crt)
+    for domain in "${certs[@]}"; do
         printf "   %d) %s\n" "$i" "$domain" >&2
         (( i++ )) || true
     done
@@ -393,9 +414,13 @@ select_existing_cert() {
         return 1
     fi
 
-    crt="${certs[$(( cert_choice - 1 ))]}"
-    key="${crt%.crt}.key"
-    domain=$(basename "$crt" .crt)
+    domain="${certs[$(( cert_choice - 1 ))]}"
+    crt="${SB_CERT_DIR}/${domain}.crt"
+    key="${SB_CERT_DIR}/${domain}.key"
+    if [[ ! -f "$crt" || ! -f "$key" ]]; then
+        info "证书未安装到 sing-box，尝试从 acme.sh 安装 fullchain..."
+        acme_install_cert "$domain" || return 1
+    fi
     SELECTED_CERT_DOMAIN="$domain"
     SELECTED_CERT_PATH="$crt"
     SELECTED_CERT_KEY_PATH="$key"
@@ -403,12 +428,10 @@ select_existing_cert() {
 
 delete_existing_cert() {
     local certs=() crt key domain cert_choice confirm
-    while IFS= read -r crt; do
-        [[ -n "$crt" ]] || continue
-        key="${crt%.crt}.key"
-        [[ -f "$key" ]] || continue
-        certs+=("$crt")
-    done < <(find "$SB_CERT_DIR" -maxdepth 1 -type f -name '*.crt' 2>/dev/null | sort)
+    while IFS= read -r domain; do
+        [[ -n "$domain" ]] || continue
+        certs+=("$domain")
+    done < <(collect_reusable_cert_domains)
 
     if [[ ${#certs[@]} -eq 0 ]]; then
         warn "没有可删除的本地证书"
@@ -416,10 +439,9 @@ delete_existing_cert() {
     fi
 
     echo "" >&2
-    echo "  删除本地证书:" >&2
+    echo "  删除证书:" >&2
     local i=1
-    for crt in "${certs[@]}"; do
-        domain=$(basename "$crt" .crt)
+    for domain in "${certs[@]}"; do
         printf "   %d) %s\n" "$i" "$domain" >&2
         (( i++ )) || true
     done
@@ -431,14 +453,15 @@ delete_existing_cert() {
         return 1
     fi
 
-    crt="${certs[$(( cert_choice - 1 ))]}"
-    key="${crt%.crt}.key"
-    domain=$(basename "$crt" .crt)
+    domain="${certs[$(( cert_choice - 1 ))]}"
+    crt="${SB_CERT_DIR}/${domain}.crt"
+    key="${SB_CERT_DIR}/${domain}.key"
     printf "${C_YELLOW}[?]${NC} 输入 DELETE 确认删除 %s:" "$domain" >&2
     read -r confirm
     [[ "$confirm" == "DELETE" ]] || { warn "已取消删除"; return 0; }
 
     rm -f -- "$crt" "$key"
+    rm -rf -- "$HOME/.acme.sh/${domain}_ecc" 2>/dev/null || true
     info "已删除本地证书: ${domain}"
 }
 

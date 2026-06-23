@@ -176,7 +176,7 @@ AI 日本家宽 SS 链接     -> 出站 tag: ss-ai
 
 内置 AI 规则会自动转换为 sing-box 可用字段：
 
-- `geosite:openai`、`geosite:anthropic` → `geosite`
+- `geosite:openai`、`geosite:anthropic` 兼容旧写法，会自动展开为域名规则
 - `claude.ai`、`perplexity.ai`、`mistral.ai` 等 → `domain`
 - 自动生成精简后的 `domain_suffix`
 - 输入 `https://new.ai:443/path` 这类 URL 时会自动提取为 `new.ai`
@@ -311,6 +311,7 @@ bash volsb.sh install
 
 - **需要 root 权限**运行，建议 `sudo -i` 后执行
 - sing-box 最低版本要求 **1.12.0**（部分 DNS 配置格式已更新）
+- sing-box 1.12+ 已移除旧版 `geosite` 数据库，脚本会把内置 AI 规则写为 `domain` / `domain_suffix`
 - AnyTLS 需要客户端核心同样支持 sing-box 1.12+，旧客户端可能无法识别 `anytls://` 分享链接
 - Hysteria2 和 Trojan 使用自签证书时，客户端需开启"跳过证书验证"
 - `2022-blake3-*` 系列加密的密码必须是 **base64 编码的固定字节随机数**，不可使用普通字符串

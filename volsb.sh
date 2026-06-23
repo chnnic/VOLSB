@@ -788,8 +788,10 @@ _ss_outbound_json() {
 
 _ai_default_items() {
     cat <<'EOF'
-geosite:openai,
-geosite:anthropic,
+openai.com,
+chatgpt.com,
+oaistatic.com,
+oaiusercontent.com,
 claude.ai,
 anthropic.com,
 perplexity.ai,
@@ -844,9 +846,17 @@ _ai_domains_json() {
 
       ($raw | gsub("\n"; ",") | split(",") | map(trim) | map(select(length > 0))) as $items
       | reduce $items[] as $item (
-          {geosite: [], domains: [], suffixes: []};
+          {domains: [], suffixes: []};
           if ($item | ascii_downcase | startswith("geosite:")) then
-            .geosite += [($item | sub("^[Gg][Ee][Oo][Ss][Ii][Tt][Ee]:"; "") | trim | ascii_downcase)]
+            ($item | sub("^[Gg][Ee][Oo][Ss][Ii][Tt][Ee]:"; "") | trim | ascii_downcase) as $site
+            | if $site == "openai" then
+                .domains += ["openai.com", "chatgpt.com", "oaistatic.com", "oaiusercontent.com"]
+                | .suffixes += [".openai.com", ".chatgpt.com", ".oaistatic.com", ".oaiusercontent.com"]
+              elif $site == "anthropic" then
+                .domains += ["anthropic.com", "claude.ai"]
+                | .suffixes += [".anthropic.com", ".claude.ai"]
+              else .
+              end
           else
             ($item | host) as $domain
             | if $domain == "" then .
@@ -855,7 +865,6 @@ _ai_domains_json() {
           end
         )
       | {
-          geosite: (.geosite | unique),
           domains: (.domains | unique),
           suffixes: (
             (.suffixes | unique) as $suffixes
@@ -954,7 +963,7 @@ build_route_profile_json() {
         return 0
     fi
 
-    local home_out ai_out domains_json domains suffixes geosites split_tags_json direct_tags_json
+    local home_out ai_out domains_json domains suffixes split_tags_json direct_tags_json
     home_out=$(_ss_outbound_json "ss-home" "$ROUTE_HOME_ADDR" "$ROUTE_HOME_PORT" "$ROUTE_HOME_METHOD" "$ROUTE_HOME_PASS") || return 1
     ai_out=$(_ss_outbound_json "$ROUTE_AI_TAG" "$ROUTE_AI_ADDR" "$ROUTE_AI_PORT" "$ROUTE_AI_METHOD" "$ROUTE_AI_PASS") || return 1
     ROUTE_OUTBOUNDS_JSON=$(printf '%s\n%s\n%s\n%s\n' \
@@ -965,7 +974,6 @@ build_route_profile_json() {
     domains_json=$(_ai_domains_json)
     domains=$(echo "$domains_json" | jq '.domains')
     suffixes=$(echo "$domains_json" | jq '.suffixes')
-    geosites=$(echo "$domains_json" | jq '.geosite')
     split_tags_json=$(printf '%s\n' "${ROUTE_SPLIT_TAGS[@]}" | jq -R . | jq -s 'unique')
     if [[ ${#ROUTE_DIRECT_TAGS[@]} -gt 0 ]]; then
         direct_tags_json=$(printf '%s\n' "${ROUTE_DIRECT_TAGS[@]}" | jq -R . | jq -s 'unique')
@@ -977,12 +985,10 @@ build_route_profile_json() {
         --arg final_tag "ss-home" \
         --argjson domains "$domains" \
         --argjson suffixes "$suffixes" \
-        --argjson geosites "$geosites" \
         --argjson split_tags "$split_tags_json" \
         --argjson direct_tags "$direct_tags_json" \
         '[
-          ({inbound:$split_tags,domain:$domains,domain_suffix:$suffixes,action:"route",outbound:$ai_tag}
-            + if ($geosites | length) > 0 then {geosite:$geosites} else {} end),
+          {inbound:$split_tags,domain:$domains,domain_suffix:$suffixes,action:"route",outbound:$ai_tag},
           {inbound:$split_tags,action:"route",outbound:$final_tag}
         ] as $split_rules
         | ($direct_tags | length) as $direct_count

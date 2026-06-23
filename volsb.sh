@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.4.9
+#   版本   : 1.4.10
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.4.9"
+VOLSB_VER="1.4.10"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -254,7 +254,18 @@ get_public_ip() {
     done
     # IPv6 fallback
     ip=$(curl -fsSL --max-time 5 "https://api6.ipify.org" 2>/dev/null | tr -d '[:space:]')
-    echo "${ip:-}"
+    [[ "$ip" == *:* ]] && echo "$ip" || echo ""
+}
+
+url_host() {
+    local host="$1"
+    if [[ "$host" == \[*\] ]]; then
+        echo "$host"
+    elif [[ "$host" == *:* ]]; then
+        echo "[${host}]"
+    else
+        echo "$host"
+    fi
 }
 
 random_port() {
@@ -600,7 +611,8 @@ deploy_vless_reality() {
         users_json+=$(printf '{"uuid":"%s","flow":"xtls-rprx-vision"}' "$uuid")
         short_ids_json+=$(printf '"%s"' "$short_id")
 
-        local link="vless://${uuid}@${CONNECT_ADDR}:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${sni}&fp=chrome&pbk=${pub_key}&sid=${short_id}&type=tcp#VOLSB-Reality-${i}"
+        local connect_host; connect_host=$(url_host "$CONNECT_ADDR")
+        local link="vless://${uuid}@${connect_host}:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${sni}&fp=chrome&pbk=${pub_key}&sid=${short_id}&type=tcp#VOLSB-Reality-${i}"
         ALL_LINKS+=("$link")
 
         cat >> "$SB_INFO" <<INFO
@@ -667,7 +679,8 @@ deploy_hysteria2() {
         (( idx++ )) || true
         users_json+="{\"password\":\"${pwd}\"}"
         local ins_param=""; [[ "$insecure" == "true" ]] && ins_param="&insecure=1"
-        local link="hysteria2://${pwd}@${CONNECT_ADDR}:${port}/?sni=${masq_domain}${ins_param}#VOLSB-HY2-${i}"
+        local connect_host; connect_host=$(url_host "$CONNECT_ADDR")
+        local link="hysteria2://${pwd}@${connect_host}:${port}/?sni=${masq_domain}${ins_param}#VOLSB-HY2-${i}"
         ALL_LINKS+=("$link")
         cat >> "$SB_INFO" <<INFO
   [Hysteria2 #${i}]
@@ -769,7 +782,8 @@ deploy_trojan() {
         (( idx++ )) || true
         users_json+="{\"password\":\"${pwd}\"}"
         local ins_param=""; [[ "$insecure" == "true" ]] && ins_param="&allowInsecure=1"
-        local link="trojan://${pwd}@${CONNECT_ADDR}:${port}?sni=${masq_domain}${ins_param}#VOLSB-Trojan-${i}"
+        local connect_host; connect_host=$(url_host "$CONNECT_ADDR")
+        local link="trojan://${pwd}@${connect_host}:${port}?sni=${masq_domain}${ins_param}#VOLSB-Trojan-${i}"
         ALL_LINKS+=("$link")
         cat >> "$SB_INFO" <<INFO
   [Trojan #${i}]
@@ -1306,7 +1320,8 @@ INFOHEADER
         (( idx++ )) || true
         users_json+="{\"uuid\":\"${uuid}\",\"flow\":\"xtls-rprx-vision\"}"
         short_ids+="\"${sid}\""
-        local link="vless://${uuid}@${CONNECT_ADDR}:${in_port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${sni}&fp=chrome&pbk=${pub_key}&sid=${sid}&type=tcp#VOLSB-Relay-${i}"
+        local connect_host; connect_host=$(url_host "$CONNECT_ADDR")
+        local link="vless://${uuid}@${connect_host}:${in_port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${sni}&fp=chrome&pbk=${pub_key}&sid=${sid}&type=tcp#VOLSB-Relay-${i}"
         ALL_LINKS+=("$link")
         cat >> "$SB_INFO" <<INFO
   [线路机 VLESS-Reality #${i}]
@@ -1499,7 +1514,8 @@ deploy_anytls() {
             ins_param="&security=tls&type=tcp"
             [[ "$insecure" == "true" ]] && ins_param+="&insecure=1"
         fi
-        local link="anytls://${pwd}@${link_addr}:${port}?sni=${masq_domain}${ins_param}#VOLSB-AnyTLS-${i}"
+        local link_host; link_host=$(url_host "$link_addr")
+        local link="anytls://${pwd}@${link_host}:${port}?sni=${masq_domain}${ins_param}#VOLSB-AnyTLS-${i}"
         ALL_LINKS+=("$link")
         local reality_info=""
         if [[ "$tls_mode" == "reality" ]]; then

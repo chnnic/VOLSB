@@ -11,7 +11,7 @@
     ╚═══╝   ╚═════╝ ╚══════╝╚══════╝╚═════╝
 ```
 
-[![Version](https://img.shields.io/badge/version-1.4.9-blue.svg)](https://github.com/chnnic/VOLSB)
+[![Version](https://img.shields.io/badge/version-1.4.10-blue.svg)](https://github.com/chnnic/VOLSB)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![sing-box](https://img.shields.io/badge/sing--box-1.13.13-orange.svg)](https://github.com/SagerNet/sing-box)
 
@@ -33,6 +33,7 @@ VOLSB 是一个功能完整的 **sing-box 服务端** 一键部署脚本，支�
 | 多协议支持 | VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS v3 / AnyTLS |
 | 多节点生成 | 每个协议支持同时生成 1-10 个节点（独立 UUID/密码） |
 | 按节点出口 | 每个入站节点组可选择 VPS 直连、AI 分流 + SS 家宽出口，或 AI 分流 + VPS 直连 |
+| IPv6 支持 | 入站监听 IPv4/IPv6，分享链接会自动兼容 IPv6 地址格式 |
 | 自动生成密钥 | Reality 密钥对、UUID、ShortID 全自动生成 |
 | 自定义连接地址 | 自动检测公网 IP 或手动输入 IP/DDNS 域名 |
 | 分享链接 | 自动生成标准分享链接，支持二维码输出 |
@@ -106,7 +107,7 @@ volsb uninstall      # 完全卸载
 ```
   ██╗   ██╗ ██████╗ ██╗     ███████╗██████╗
   ...
-  v1.4.9  |  2026-06-24 02:10:00
+  v1.4.10  |  2026-06-24 02:25:00
 
   状态: ● 运行中
   版本: 1.13.13

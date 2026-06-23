@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.3.7
+#   版本   : 1.3.8
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.3.7"
+VOLSB_VER="1.3.8"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -951,6 +951,33 @@ ask_inbound_route_mode() {
     esac
 }
 
+_tag_exists_in_list() {
+    local needle="$1"; shift || true
+    local item
+    for item in "$@"; do
+        [[ "$item" == "$needle" ]] && return 0
+    done
+    return 1
+}
+
+_replace_first_route_tag() {
+    local old_tag="$1" new_tag="$2"
+    local i
+    for i in "${!ROUTE_SPLIT_TAGS[@]}"; do
+        if [[ "${ROUTE_SPLIT_TAGS[$i]}" == "$old_tag" ]]; then
+            ROUTE_SPLIT_TAGS[$i]="$new_tag"
+            return 0
+        fi
+    done
+    for i in "${!ROUTE_DIRECT_TAGS[@]}"; do
+        if [[ "${ROUTE_DIRECT_TAGS[$i]}" == "$old_tag" ]]; then
+            ROUTE_DIRECT_TAGS[$i]="$new_tag"
+            return 0
+        fi
+    done
+    return 1
+}
+
 build_route_profile_json() {
     if [[ ${#ROUTE_SPLIT_TAGS[@]} -eq 0 ]]; then
         ROUTE_OUTBOUNDS_JSON='[
@@ -1398,6 +1425,7 @@ append_and_write_config() {
 
     # 生成新入站
     ALL_INBOUNDS=(); ALL_LINKS=()
+    local preserved_inbound_count=0
 
     # 若保留旧节点，先把旧入站塞进 ALL_INBOUNDS
     if $keep_old && [[ "$old_inbounds_json" != "[]" ]]; then
@@ -1409,6 +1437,7 @@ append_and_write_config() {
             ALL_INBOUNDS+=("$ib")
             (( oi++ )) || true
         done
+        preserved_inbound_count="$old_count"
         # 同时保留旧链接
         if [[ -f "$SB_LINKS" ]]; then
             while IFS= read -r lnk; do
@@ -1448,12 +1477,26 @@ append_and_write_config() {
     if [[ "$unique_tags" -lt "$total_tags" ]]; then
         warn "检测到重复的入站 tag，自动重命名..."
         local fixed_inbounds=()
-        local tag_count=0
+        local seen_tags=()
+        local idx=0
         for ib in "${ALL_INBOUNDS[@]}"; do
             local t; t=$(echo "$ib" | jq -r '.tag // ""' 2>/dev/null)
-            local new_tag="${t}-$(( ++tag_count ))"
-            ib=$(echo "$ib" | jq --arg nt "$new_tag" '.tag = $nt' 2>/dev/null)
+            local new_tag="$t"
+            if [[ -n "$t" ]] && _tag_exists_in_list "$new_tag" "${seen_tags[@]}"; then
+                local suffix=2
+                while _tag_exists_in_list "${t}-${suffix}" "${seen_tags[@]}"; do
+                    (( suffix++ )) || true
+                done
+                new_tag="${t}-${suffix}"
+                ib=$(echo "$ib" | jq --arg nt "$new_tag" '.tag = $nt' 2>/dev/null)
+                if [[ "$idx" -ge "$preserved_inbound_count" ]]; then
+                    _replace_first_route_tag "$t" "$new_tag" || true
+                fi
+                warn "入站 tag ${t} → ${new_tag}"
+            fi
             fixed_inbounds+=("$ib")
+            seen_tags+=("$new_tag")
+            (( idx++ )) || true
         done
         ALL_INBOUNDS=("${fixed_inbounds[@]}")
     fi
@@ -2497,7 +2540,7 @@ LOGO
             1)  do_install || true ;;
             2)  require_root; ask_connect_addr; select_protocols
                 append_and_write_config || true
-                svc_restart && info "配置已更新" || true ;;
+                svc_restart && { info "配置已更新"; show_nodes; } || true ;;
             3)  do_update_menu || true ;;
             4)  do_uninstall || true ;;
             5)  require_root; svc_start  && info "已启动" || true ;;
@@ -2596,7 +2639,7 @@ HDR
             require_root
             [[ -f "$SB_CONFIG" ]] || die "请先安装"
             ask_connect_addr; select_protocols; append_and_write_config
-            svc_restart && info "已更新并重启" ;;
+            svc_restart && { info "已更新并重启"; show_nodes; } ;;
         update|upgrade)   do_update_singbox ;;
         self-update)      do_update_script ;;
         sync-time)        sync_time ;;

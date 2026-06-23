@@ -11,7 +11,7 @@
     ╚═══╝   ╚═════╝ ╚══════╝╚══════╝╚═════╝
 ```
 
-[![Version](https://img.shields.io/badge/version-1.3.9-blue.svg)](https://github.com/chnnic/VOLSB)
+[![Version](https://img.shields.io/badge/version-1.4.0-blue.svg)](https://github.com/chnnic/VOLSB)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![sing-box](https://img.shields.io/badge/sing--box-1.13.13-orange.svg)](https://github.com/SagerNet/sing-box)
 
@@ -105,7 +105,7 @@ volsb uninstall      # 完全卸载
 ```
   ██╗   ██╗ ██████╗ ██╗     ███████╗██████╗
   ...
-  v1.3.9  |  2026-06-23 18:00:00
+  v1.4.0  |  2026-06-23 18:00:00
 
   状态: ● 运行中
   版本: 1.13.13
@@ -148,7 +148,7 @@ volsb uninstall      # 完全卸载
 | 3 | VMess + WebSocket | TCP/WS | 适合套 CDN 或 Nginx TLS 反代 |
 | 4 | Trojan + TLS | TCP | 经典方案，客户端兼容性好 |
 | 5 | ShadowTLS v3 + Shadowsocks | TCP | 流量伪装为真实 TLS 握手 |
-| 6 | AnyTLS | TCP | sing-box 1.12+ 支持的新型 TLS 伪装 |
+| 6 | AnyTLS | TCP | 支持自签 / Let's Encrypt / Reality |
 
 ---
 
@@ -167,6 +167,7 @@ volsb uninstall      # 完全卸载
 - 直连节点：所有流量走 VPS 本地出口
 - 分流节点：AI 流量走 `ss-ai`，其他流量走 `ss-home`
 - 分流节点会自动开启入站 sniff，用于识别 TLS/HTTP 目标域名并命中 AI 规则
+- AnyTLS 可选择 Reality 模式，无需证书，并会生成 `pbk` / `sid` 分享参数
 
 分流模式会要求填写两个 Shadowsocks 链接：
 
@@ -314,7 +315,7 @@ bash volsb.sh install
 - **需要 root 权限**运行，建议 `sudo -i` 后执行
 - sing-box 最低版本要求 **1.12.0**（部分 DNS 配置格式已更新）
 - sing-box 1.12+ 已移除旧版 `geosite` 数据库，脚本会把内置 AI 规则写为 `domain` / `domain_suffix`
-- AnyTLS 需要客户端核心同样支持 sing-box 1.12+，旧客户端可能无法识别 `anytls://` 分享链接
+- AnyTLS 需要客户端核心同样支持 sing-box 1.12+，AnyTLS + Reality 需要客户端支持 Reality TLS 参数
 - Hysteria2 和 Trojan 使用自签证书时，客户端需开启"跳过证书验证"
 - `2022-blake3-*` 系列加密的密码必须是 **base64 编码的固定字节随机数**，不可使用普通字符串
 - 线路机与落地机时间差必须 **小于 30 秒**

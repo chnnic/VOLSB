@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.3.9
+#   版本   : 1.4.0
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.3.9"
+VOLSB_VER="1.4.0"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -1223,7 +1223,8 @@ JSON
 deploy_anytls() {
     step "配置 AnyTLS"
 
-    local port cert_path key_path masq_domain insecure="true"
+    local port cert_path key_path masq_domain insecure="true" tls_mode="cert"
+    local reality_priv_key="" reality_pub_key="" reality_short_ids_json="[]"
 
     if [[ -n "${VOLSB_PORT:-}" ]]; then
         port="$VOLSB_PORT"; info "端口 (环境变量): $port"
@@ -1232,13 +1233,25 @@ deploy_anytls() {
         [[ -z "$port" ]] && port=$(random_port)
     fi
 
-    echo "  TLS 证书:"
+    echo "  TLS 模式:"
     echo "   1) 自签证书 (客户端需开 insecure)"
     echo "   2) Let's Encrypt 正式证书"
-    ask "选择 [1/2] 默认1:"; read -r cchoice
+    echo "   3) Reality (无需证书,客户端需支持 AnyTLS + Reality)"
+    ask "选择 [1/2/3] 默认1:"; read -r cchoice
     [[ -z "$cchoice" ]] && cchoice="1"
 
-    if [[ "$cchoice" == "2" ]]; then
+    if [[ "$cchoice" == "3" ]]; then
+        tls_mode="reality"
+        insecure="false"
+        echo ""
+        echo "  Reality SNI 用于伪装 TLS 握手,建议选目标国大型网站:"
+        echo "  推荐: www.cloudflare.com / www.microsoft.com / www.apple.com / dl.google.com"
+        ask "输入 SNI [默认 www.cloudflare.com]:"; read -r masq_domain
+        [[ -z "$masq_domain" ]] && masq_domain="www.cloudflare.com"
+        local keypair; keypair=$("$SB_BIN" generate reality-keypair)
+        reality_priv_key=$(echo "$keypair" | awk '/PrivateKey/{print $2}')
+        reality_pub_key=$(echo  "$keypair" | awk '/PublicKey/{print $2}')
+    elif [[ "$cchoice" == "2" ]]; then
         ask "域名:"; read -r masq_domain
         [[ -z "$masq_domain" ]] && { err "域名不能为空"; return 1; }
         acme_issue "$masq_domain"
@@ -1253,16 +1266,37 @@ deploy_anytls() {
 
     ask_multi_user_count; local user_count="$USER_COUNT"
     local users_json="["; local idx=0
+    [[ "$tls_mode" == "reality" ]] && reality_short_ids_json="["
 
     for i in $(seq 1 "$user_count"); do
         local pwd; pwd=$(gen_rand_str 24)
-        [[ $idx -gt 0 ]] && users_json+=","
+        local short_id=""
+        [[ $idx -gt 0 ]] && {
+            users_json+=","
+            [[ "$tls_mode" == "reality" ]] && reality_short_ids_json+=","
+        }
         (( idx++ )) || true
         users_json+=$(printf '{"password":"%s"}' "$pwd")
 
-        local ins_param=""; [[ "$insecure" == "true" ]] && ins_param="&insecure=1"
+        if [[ "$tls_mode" == "reality" ]]; then
+            short_id=$(gen_rand_hex 8)
+            reality_short_ids_json+=$(printf '"%s"' "$short_id")
+        fi
+
+        local ins_param=""
+        if [[ "$tls_mode" == "reality" ]]; then
+            ins_param="&security=reality&fp=chrome&pbk=${reality_pub_key}&sid=${short_id}&type=tcp"
+        elif [[ "$insecure" == "true" ]]; then
+            ins_param="&insecure=1"
+        fi
         local link="anytls://${pwd}@${CONNECT_ADDR}:${port}?sni=${masq_domain}${ins_param}#VOLSB-AnyTLS-${i}"
         ALL_LINKS+=("$link")
+        local reality_info=""
+        if [[ "$tls_mode" == "reality" ]]; then
+            reality_info="    Reality  : yes
+    PublicKey: ${reality_pub_key}
+    ShortID  : ${short_id}"
+        fi
 
         cat >> "$SB_INFO" <<INFO
   [AnyTLS #${i}]
@@ -1271,20 +1305,41 @@ deploy_anytls() {
     密码     : ${pwd}
     SNI      : ${masq_domain}
     跳过验证 : ${insecure}
+${reality_info}
     链接     : ${link}
 INFO
     done
     users_json+="]"
+    [[ "$tls_mode" == "reality" ]] && reality_short_ids_json+="]"
 
     local inbound
-    inbound=$(jq -n         --argjson port  "$port"         --argjson users "$users_json"         --arg     cert  "$cert_path"         --arg     key   "$key_path"         '{type:"anytls",tag:"anytls-in",listen:"::",listen_port:$port,
-           sniff:true,sniff_override_destination:true,
-           users:$users,tls:{enabled:true,certificate_path:$cert,key_path:$key}}')
+    if [[ "$tls_mode" == "reality" ]]; then
+        inbound=$(jq -n \
+            --argjson port      "$port" \
+            --argjson users     "$users_json" \
+            --arg     sni       "$masq_domain" \
+            --arg     priv_key  "$reality_priv_key" \
+            --argjson short_ids "$reality_short_ids_json" \
+            '{type:"anytls",tag:"anytls-in",listen:"::",listen_port:$port,
+              sniff:true,sniff_override_destination:true,
+              users:$users,tls:{enabled:true,server_name:$sni,
+              reality:{enabled:true,handshake:{server:$sni,server_port:443},
+              private_key:$priv_key,short_id:$short_ids}}}')
+    else
+        inbound=$(jq -n \
+            --argjson port  "$port" \
+            --argjson users "$users_json" \
+            --arg     cert  "$cert_path" \
+            --arg     key   "$key_path" \
+            '{type:"anytls",tag:"anytls-in",listen:"::",listen_port:$port,
+              sniff:true,sniff_override_destination:true,
+              users:$users,tls:{enabled:true,certificate_path:$cert,key_path:$key}}')
+    fi
     ALL_INBOUNDS+=("$inbound")
     ask_inbound_route_mode "anytls-in" "AnyTLS" || return 1
 
     open_port "$port" tcp
-    info "✓ AnyTLS | 端口:$port | 用户数:$user_count"
+    info "✓ AnyTLS | 端口:$port | 用户数:$user_count | TLS:${tls_mode}"
 }
 
 
@@ -1305,7 +1360,7 @@ BANNER
     printf "  ${C_BOLD}%-5s${NC} %-30s %-10s %s\n" "3)" "VMess + WebSocket"        "TCP/WS" "适合套 CDN / Nginx 反代"
     printf "  ${C_BOLD}%-5s${NC} %-30s %-10s %s\n" "4)" "Trojan + TLS"             "TCP"   "经典方案,广泛兼容"
     printf "  ${C_BOLD}%-5s${NC} %-30s %-10s %s\n" "5)" "ShadowTLS v3 + SS"        "TCP"   "真实 TLS 握手伪装"
-    printf "  ${C_BOLD}%-5s${NC} %-30s %-10s %s\n" "6)" "AnyTLS"                   "TCP"   "新型TLS伪装,sing-box 1.12+"
+    printf "  ${C_BOLD}%-5s${NC} %-30s %-10s %s\n" "6)" "AnyTLS"                   "TCP"   "TLS伪装,支持 Reality"
     printf "  ${C_BOLD}%-5s${NC} %-30s %-10s %s\n" "0)" "全部协议"                 "-"     "同时部署以上所有"
     hr
     echo ""

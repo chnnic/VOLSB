@@ -11,7 +11,7 @@
     ╚═══╝   ╚═════╝ ╚══════╝╚══════╝╚═════╝
 ```
 
-[![Version](https://img.shields.io/badge/version-1.2.9-blue.svg)](https://github.com/chnnic/VOLSB)
+[![Version](https://img.shields.io/badge/version-1.3.6-blue.svg)](https://github.com/chnnic/VOLSB)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![sing-box](https://img.shields.io/badge/sing--box-1.12%2B-orange.svg)](https://github.com/SagerNet/sing-box)
 
@@ -30,8 +30,9 @@ VOLSB 是一个功能完整的 **sing-box 服务端** 一键部署脚本，支�
 | 功能 | 说明 |
 |------|------|
 | 一键安装 | 自动下载 sing-box 最新版并部署 |
-| 多协议支持 | VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS v3 |
+| 多协议支持 | VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS v3 / AnyTLS |
 | 多节点生成 | 每个协议支持同时生成 1-10 个节点（独立 UUID/密码） |
+| 按节点出口 | 每个入站节点组可选择 VPS 直连或 AI 分流 + SS 家宽出口 |
 | 自动生成密钥 | Reality 密钥对、UUID、ShortID 全自动生成 |
 | 自定义连接地址 | 自动检测公网 IP 或手动输入 IP/DDNS 域名 |
 | 分享链接 | 自动生成标准分享链接，支持二维码输出 |
@@ -104,7 +105,7 @@ volsb uninstall      # 完全卸载
 ```
   ██╗   ██╗ ██████╗ ██╗     ███████╗██████╗
   ...
-  v1.2.9  |  2026-05-14 18:00:00
+  v1.3.6  |  2026-06-23 18:00:00
 
   状态: ● 运行中
   版本: 1.13.11
@@ -147,6 +148,50 @@ volsb uninstall      # 完全卸载
 | 3 | VMess + WebSocket | TCP/WS | 适合套 CDN 或 Nginx TLS 反代 |
 | 4 | Trojan + TLS | TCP | 经典方案，客户端兼容性好 |
 | 5 | ShadowTLS v3 + Shadowsocks | TCP | 流量伪装为真实 TLS 握手 |
+| 6 | AnyTLS | TCP | sing-box 1.12+ 支持的新型 TLS 伪装 |
+
+---
+
+## 按节点出口与 AI 分流
+
+部署机模式下，每个入站节点组都可以单独选择出口：
+
+```text
+节点出口模式: VLESS-Reality
+ 1) 直连 VPS 出口
+ 2) AI → ss-ai，其余 → ss-home
+```
+
+如果需要一条链接一个出口策略，建议每次生成节点数量填 `1`，再通过菜单 **2) 追加新协议** 一条条生成。这样可以同时保留：
+
+- 直连节点：所有流量走 VPS 本地出口
+- 分流节点：AI 流量走 `ss-ai`，其他流量走 `ss-home`
+
+分流模式会要求填写两个 Shadowsocks 链接：
+
+```text
+AI 日本家宽 SS 链接     -> 出站 tag: ss-ai
+香港家宽默认出口 SS 链接 -> 出站 tag: ss-home
+```
+
+内置 AI 规则会自动转换为 sing-box 可用字段：
+
+- `geosite:openai`、`geosite:anthropic` → `geosite`
+- `claude.ai`、`perplexity.ai`、`mistral.ai` 等 → `domain`
+- 自动生成精简后的 `domain_suffix`
+- 输入 `https://new.ai:443/path` 这类 URL 时会自动提取为 `new.ai`
+
+追加自定义 AI 域名或规则时，可在安装交互中输入逗号分隔内容，例如：
+
+```text
+geosite:customai,https://new.ai/path,api.example.ai
+```
+
+也可以用环境变量：
+
+```bash
+VOLSB_AI_EXTRA="geosite:customai,https://new.ai/path,api.example.ai"
+```
 
 ---
 
@@ -233,6 +278,18 @@ VOLSB_SNI=www.cloudflare.com \  # 指定 Reality SNI
 bash volsb.sh install
 ```
 
+分流相关环境变量：
+
+```bash
+VOLSB_ROUTE_MODE=ai-ss \        # 当前生成的入站节点组使用 AI 分流
+VOLSB_AI_SS='ss://...' \        # AI 出站，tag: ss-ai
+VOLSB_HOME_SS='ss://...' \      # 默认家宽出站，tag: ss-home
+VOLSB_AI_EXTRA='https://new.ai/path,geosite:customai' \
+bash volsb.sh install
+```
+
+`VOLSB_AI_SPEC` 可用于完全覆盖内置 AI 规则；`VOLSB_AI_EXTRA` / `VOLSB_AI_DOMAINS` / `VOLSB_AI_RULES` 用于在默认规则基础上追加。
+
 ---
 
 ## 文件路径
@@ -254,6 +311,7 @@ bash volsb.sh install
 
 - **需要 root 权限**运行，建议 `sudo -i` 后执行
 - sing-box 最低版本要求 **1.12.0**（部分 DNS 配置格式已更新）
+- AnyTLS 需要客户端核心同样支持 sing-box 1.12+，旧客户端可能无法识别 `anytls://` 分享链接
 - Hysteria2 和 Trojan 使用自签证书时，客户端需开启"跳过证书验证"
 - `2022-blake3-*` 系列加密的密码必须是 **base64 编码的固定字节随机数**，不可使用普通字符串
 - 线路机与落地机时间差必须 **小于 30 秒**

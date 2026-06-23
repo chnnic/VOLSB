@@ -344,6 +344,22 @@ acme_issue() {
 # 全局:存放当前安装的所有入站 JSON 片段
 declare -a ALL_INBOUNDS=()
 declare -a ALL_LINKS=()
+ROUTE_PROFILE="direct"
+ROUTE_HOME_ADDR=""
+ROUTE_HOME_PORT=""
+ROUTE_HOME_METHOD=""
+ROUTE_HOME_PASS=""
+ROUTE_AI_ADDR=""
+ROUTE_AI_PORT=""
+ROUTE_AI_METHOD=""
+ROUTE_AI_PASS=""
+ROUTE_AI_TAG="ss-ai"
+ROUTE_OUTBOUNDS_JSON=""
+ROUTE_CONFIG_JSON=""
+ROUTE_AI_ITEMS=""
+ROUTE_SS_CONFIGURED=false
+declare -a ROUTE_DIRECT_TAGS=()
+declare -a ROUTE_SPLIT_TAGS=()
 
 # ────── 公共参数收集:连接IP/域名 ──────
 ask_connect_addr() {
@@ -476,6 +492,7 @@ INFO
            reality:{enabled:true,handshake:{server:$sni,server_port:443},
            private_key:$priv_key,short_id:$short_ids}}}')
     ALL_INBOUNDS+=("$inbound")
+    ask_inbound_route_mode "vless-reality-in" "VLESS-Reality" || return 1
 
     open_port "$port" tcp
     info "✓ VLESS-Reality | 端口:$port | 用户数:$user_count | SNI:$sni"
@@ -536,6 +553,7 @@ INFO
            users:$users,tls:{enabled:true,alpn:["h3"],
            certificate_path:$cert,key_path:$key}}')
     ALL_INBOUNDS+=("$inbound")
+    ask_inbound_route_mode "hysteria2-in" "Hysteria2" || return 1
 
     open_port "$port" udp
     info "✓ Hysteria2 | 端口:$port (UDP) | 用户数:$user_count"
@@ -580,6 +598,7 @@ INFO
         '{type:"vmess",tag:"vmess-ws-in",listen:"::",listen_port:$port,
            users:$users,transport:{type:"ws",path:$path}}')
     ALL_INBOUNDS+=("$inbound")
+    ask_inbound_route_mode "vmess-ws-in" "VMess-WS" || return 1
 
     open_port "$port" tcp
     info "✓ VMess-WS | 端口:$port | 路径:$ws_path | 用户数:$user_count"
@@ -635,6 +654,7 @@ INFO
         '{type:"trojan",tag:"trojan-in",listen:"::",listen_port:$port,
            users:$users,tls:{enabled:true,certificate_path:$cert,key_path:$key}}')
     ALL_INBOUNDS+=("$inbound")
+    ask_inbound_route_mode "trojan-in" "Trojan" || return 1
 
     open_port "$port" tcp
     info "✓ Trojan | 端口:$port | 用户数:$user_count"
@@ -688,6 +708,7 @@ INFO
            listen_port:$port,method:"2022-blake3-aes-128-gcm",users:$users}')
     ALL_INBOUNDS+=("$stls_inbound")
     ALL_INBOUNDS+=("$ss_inbound")
+    ask_inbound_route_mode "shadowtls-in" "ShadowTLS v3" || return 1
 
     open_port "$stls_port" tcp
     info "✓ ShadowTLS v3 | 端口:$stls_port | 用户数:$user_count | SNI:$sni"
@@ -737,6 +758,236 @@ _parse_ss_link() {
         return 1
     fi
     info "解析成功: ${LAND_METHOD} @ ${LAND_ADDR}:${LAND_PORT}"
+}
+
+_parse_ss_link_into() {
+    local ss_link="$1" prefix="$2"
+    _parse_ss_link "$ss_link" || return 1
+    printf -v "${prefix}_ADDR"   '%s' "$LAND_ADDR"
+    printf -v "${prefix}_PORT"   '%s' "$LAND_PORT"
+    printf -v "${prefix}_METHOD" '%s' "$LAND_METHOD"
+    printf -v "${prefix}_PASS"   '%s' "$LAND_PASS"
+}
+
+_ss_outbound_json() {
+    local tag="$1" addr="$2" port="$3" method="$4" pass="$5"
+    local port_int; port_int=$(( port + 0 )) 2>/dev/null || port_int=0
+    if [[ $port_int -eq 0 ]]; then
+        err "SS 出站端口无效: ${port}"
+        return 1
+    fi
+    jq -n \
+        --arg tag "$tag" \
+        --arg server "$addr" \
+        --argjson port "$port_int" \
+        --arg method "$method" \
+        --arg password "$pass" \
+        '{type:"shadowsocks",tag:$tag,server:$server,server_port:$port,
+          method:$method,password:$password,network:"tcp"}'
+}
+
+_ai_default_items() {
+    cat <<'EOF'
+geosite:openai,
+geosite:anthropic,
+claude.ai,
+anthropic.com,
+perplexity.ai,
+api.perplexity.ai,
+console.perplexity.ai,
+grok.com,
+x.ai,
+api.x.ai,
+console.x.ai,
+mistral.ai,
+chat.mistral.ai,
+api.mistral.ai,
+console.mistral.ai,
+meta.ai,
+ai.meta.com,
+character.ai,
+poe.com,
+api.poe.com,
+cohere.com,
+cohere.ai,
+api.cohere.com,
+api.cohere.ai,
+dashboard.cohere.com,
+huggingface.co,
+hf.co,
+aistudio.google.com,
+generativelanguage.googleapis.com,
+ai.google.dev,
+gemini.google.com,
+midjourney.com,
+alpha.midjourney.com,
+docs.midjourney.com,
+pixpix.com
+EOF
+}
+
+_ai_domains_json() {
+    local raw="${ROUTE_AI_ITEMS:-$(_ai_default_items)}"
+    jq -Rn --arg raw "$raw" '
+      def trim: gsub("^\\s+|\\s+$"; "");
+      def host:
+        trim
+        | sub("^https?://"; "")
+        | sub("^//"; "")
+        | split("/")[0]
+        | split("?")[0]
+        | split("#")[0]
+        | sub(":[0-9]+$"; "")
+        | sub("^\\*\\."; "")
+        | ascii_downcase
+        | trim;
+
+      ($raw | gsub("\n"; ",") | split(",") | map(trim) | map(select(length > 0))) as $items
+      | reduce $items[] as $item (
+          {geosite: [], domains: [], suffixes: []};
+          if ($item | ascii_downcase | startswith("geosite:")) then
+            .geosite += [($item | sub("^[Gg][Ee][Oo][Ss][Ii][Tt][Ee]:"; "") | trim | ascii_downcase)]
+          else
+            ($item | host) as $domain
+            | if $domain == "" then .
+              else .domains += [$domain] | .suffixes += [("." + $domain)]
+              end
+          end
+        )
+      | {
+          geosite: (.geosite | unique),
+          domains: (.domains | unique),
+          suffixes: (
+            (.suffixes | unique) as $suffixes
+            | [ $suffixes[] as $s
+                | select([ $suffixes[] as $other | select($other != $s and ($s | endswith($other))) ] | length == 0)
+                | $s
+              ]
+          )
+        }'
+}
+
+reset_route_profile() {
+    ROUTE_PROFILE="mixed"
+    ROUTE_HOME_ADDR=""; ROUTE_HOME_PORT=""; ROUTE_HOME_METHOD=""; ROUTE_HOME_PASS=""
+    ROUTE_AI_ADDR=""; ROUTE_AI_PORT=""; ROUTE_AI_METHOD=""; ROUTE_AI_PASS=""
+    ROUTE_AI_TAG="ss-ai"
+    ROUTE_AI_ITEMS=""
+    ROUTE_SS_CONFIGURED=false
+    ROUTE_DIRECT_TAGS=()
+    ROUTE_SPLIT_TAGS=()
+}
+
+ensure_route_ss_config() {
+    $ROUTE_SS_CONFIGURED && return 0
+
+    local ai_link="${VOLSB_AI_SS:-${VOLSB_JP_AI_SS:-${VOLSB_SS_AI_LINK:-}}}"
+    while [[ -z "$ai_link" ]]; do
+        ask "粘贴 AI 日本家宽 SS 链接 (ss://...):"; read -r ai_link
+        [[ "$ai_link" == ss://* ]] || { err "请输入 ss:// 开头的链接"; ai_link=""; }
+    done
+    _parse_ss_link_into "$ai_link" "ROUTE_AI" || return 1
+
+    local home_link="${VOLSB_HOME_SS:-${VOLSB_HK_HOME_SS:-${VOLSB_SS_HOME_LINK:-}}}"
+    while [[ -z "$home_link" ]]; do
+        ask "粘贴香港家宽默认出口 SS 链接 (ss://...):"; read -r home_link
+        [[ "$home_link" == ss://* ]] || { err "请输入 ss:// 开头的链接"; home_link=""; }
+    done
+    _parse_ss_link_into "$home_link" "ROUTE_HOME" || return 1
+
+    local ai_extra="${VOLSB_AI_EXTRA:-${VOLSB_AI_DOMAINS:-${VOLSB_AI_RULES:-}}}"
+    if [[ -n "${VOLSB_AI_SPEC:-}" ]]; then
+        ROUTE_AI_ITEMS="$VOLSB_AI_SPEC"
+    else
+        ROUTE_AI_ITEMS="$(_ai_default_items)"
+        if [[ -z "$ai_extra" ]]; then
+            ask "追加 AI 域名/geosite? 逗号分隔，回车跳过:"; read -r ai_extra
+        fi
+        [[ -n "$ai_extra" ]] && ROUTE_AI_ITEMS="${ROUTE_AI_ITEMS},${ai_extra}"
+    fi
+    ROUTE_SS_CONFIGURED=true
+
+    cat >> "$SB_INFO" <<INFO
+
+  [分流系统]
+    模式     : AI → 日本家宽 SS，其余 → 香港家宽 SS
+    AI 出口  : ${ROUTE_AI_METHOD} @ ${ROUTE_AI_ADDR}:${ROUTE_AI_PORT} (${ROUTE_AI_TAG})
+    默认出口 : ${ROUTE_HOME_METHOD} @ ${ROUTE_HOME_ADDR}:${ROUTE_HOME_PORT} (ss-home)
+INFO
+}
+
+ask_inbound_route_mode() {
+    local tag="$1" label="${2:-$1}"
+    local mode="${VOLSB_ROUTE_MODE:-${VOLSB_ROUTE_PROFILE:-}}"
+
+    if [[ -z "$mode" ]]; then
+        echo ""
+        echo "  节点出口模式: ${label}"
+        echo "   1) 直连 VPS 出口"
+        echo "   2) AI → ss-ai，其余 → ss-home"
+        ask "选择 [1/2] 默认1:"; read -r mode
+        [[ -z "$mode" ]] && mode="1"
+    fi
+
+    case "$mode" in
+        2|ai|ai-ss|ss-home|split|hk-jp)
+            ensure_route_ss_config || return 1
+            ROUTE_SPLIT_TAGS+=("$tag")
+            info "路由: ${label} → AI 分流 / 默认 SS 家宽"
+            ;;
+        *)
+            ROUTE_DIRECT_TAGS+=("$tag")
+            info "路由: ${label} → 直连 VPS 出口"
+            ;;
+    esac
+}
+
+build_route_profile_json() {
+    if [[ ${#ROUTE_SPLIT_TAGS[@]} -eq 0 ]]; then
+        ROUTE_OUTBOUNDS_JSON='[
+    {"type": "direct", "tag": "direct"},
+    {"type": "block",  "tag": "block"}
+  ]'
+        ROUTE_CONFIG_JSON='{
+    "final": "direct"
+  }'
+        return 0
+    fi
+
+    local home_out ai_out domains_json domains suffixes geosites split_tags_json direct_tags_json
+    home_out=$(_ss_outbound_json "ss-home" "$ROUTE_HOME_ADDR" "$ROUTE_HOME_PORT" "$ROUTE_HOME_METHOD" "$ROUTE_HOME_PASS") || return 1
+    ai_out=$(_ss_outbound_json "$ROUTE_AI_TAG" "$ROUTE_AI_ADDR" "$ROUTE_AI_PORT" "$ROUTE_AI_METHOD" "$ROUTE_AI_PASS") || return 1
+    ROUTE_OUTBOUNDS_JSON=$(printf '%s\n%s\n%s\n%s\n' \
+        "$ai_out" "$home_out" \
+        '{"type":"direct","tag":"direct"}' \
+        '{"type":"block","tag":"block"}' | jq -s '.')
+
+    domains_json=$(_ai_domains_json)
+    domains=$(echo "$domains_json" | jq '.domains')
+    suffixes=$(echo "$domains_json" | jq '.suffixes')
+    geosites=$(echo "$domains_json" | jq '.geosite')
+    split_tags_json=$(printf '%s\n' "${ROUTE_SPLIT_TAGS[@]}" | jq -R . | jq -s 'unique')
+    if [[ ${#ROUTE_DIRECT_TAGS[@]} -gt 0 ]]; then
+        direct_tags_json=$(printf '%s\n' "${ROUTE_DIRECT_TAGS[@]}" | jq -R . | jq -s 'unique')
+    else
+        direct_tags_json="[]"
+    fi
+    ROUTE_CONFIG_JSON=$(jq -n \
+        --arg ai_tag "$ROUTE_AI_TAG" \
+        --arg final_tag "ss-home" \
+        --argjson domains "$domains" \
+        --argjson suffixes "$suffixes" \
+        --argjson geosites "$geosites" \
+        --argjson split_tags "$split_tags_json" \
+        --argjson direct_tags "$direct_tags_json" \
+        '[
+          ({inbound:$split_tags,domain:$domains,domain_suffix:$suffixes,action:"route",outbound:$ai_tag}
+            + if ($geosites | length) > 0 then {geosite:$geosites} else {} end),
+          {inbound:$split_tags,action:"route",outbound:$final_tag}
+        ] as $split_rules
+        | ($direct_tags | length) as $direct_count
+        | {rules:($split_rules + (if $direct_count > 0 then [{inbound:$direct_tags,action:"route",outbound:"direct"}] else [] end)),
+           final:"direct"}')
 }
 
 # ════════════════════════════════════════════════════════════
@@ -973,6 +1224,7 @@ deploy_anytls() {
 
         local ins_param=""; [[ "$insecure" == "true" ]] && ins_param="&insecure=1"
         local link="anytls://${pwd}@${CONNECT_ADDR}:${port}?sni=${masq_domain}${ins_param}#VOLSB-AnyTLS-${i}"
+        ALL_LINKS+=("$link")
 
         cat >> "$SB_INFO" <<INFO
   [AnyTLS #${i}]
@@ -990,6 +1242,7 @@ INFO
     inbound=$(jq -n         --argjson port  "$port"         --argjson users "$users_json"         --arg     cert  "$cert_path"         --arg     key   "$key_path"         '{type:"anytls",tag:"anytls-in",listen:"::",listen_port:$port,
            users:$users,tls:{enabled:true,certificate_path:$cert,key_path:$key}}')
     ALL_INBOUNDS+=("$inbound")
+    ask_inbound_route_mode "anytls-in" "AnyTLS" || return 1
 
     open_port "$port" tcp
     info "✓ AnyTLS | 端口:$port | 用户数:$user_count"
@@ -1013,7 +1266,7 @@ BANNER
     printf "  ${C_BOLD}%-5s${NC} %-30s %-10s %s\n" "3)" "VMess + WebSocket"        "TCP/WS" "适合套 CDN / Nginx 反代"
     printf "  ${C_BOLD}%-5s${NC} %-30s %-10s %s\n" "4)" "Trojan + TLS"             "TCP"   "经典方案,广泛兼容"
     printf "  ${C_BOLD}%-5s${NC} %-30s %-10s %s\n" "5)" "ShadowTLS v3 + SS"        "TCP"   "真实 TLS 握手伪装"
-    printf "  ${C_BOLD}%-5s${NC} %-30s %-10s %s\n" "6)" "AnyTLS"                   "TCP"   "新型TLS伪装,sing-box 1.11+"
+    printf "  ${C_BOLD}%-5s${NC} %-30s %-10s %s\n" "6)" "AnyTLS"                   "TCP"   "新型TLS伪装,sing-box 1.12+"
     printf "  ${C_BOLD}%-5s${NC} %-30s %-10s %s\n" "0)" "全部协议"                 "-"     "同时部署以上所有"
     hr
     echo ""
@@ -1048,6 +1301,7 @@ BANNER
 _write_config() {
     # $1 = inbounds JSON array string
     local inbounds_json="$1"
+    build_route_profile_json || return 1
     step "写入配置文件"
     cat > "$SB_CONFIG" <<JSON
 {
@@ -1057,13 +1311,8 @@ _write_config() {
     "timestamp": true
   },
   "inbounds": ${inbounds_json},
-  "outbounds": [
-    {"type": "direct", "tag": "direct"},
-    {"type": "block",  "tag": "block"}
-  ],
-  "route": {
-    "final": "direct"
-  }
+  "outbounds": ${ROUTE_OUTBOUNDS_JSON},
+  "route": ${ROUTE_CONFIG_JSON}
 }
 JSON
     if "$SB_BIN" check -c "$SB_CONFIG" 2>/dev/null; then
@@ -1094,6 +1343,7 @@ assemble_and_write_config() {
     fi
     ALL_INBOUNDS=(); ALL_LINKS=()
     _init_info_header
+    reset_route_profile
 
     for proto in "${SELECTED_PROTOS[@]}"; do
         case "$proto" in
@@ -1170,6 +1420,7 @@ append_and_write_config() {
     fi
     _init_info_header
     [[ -n "$old_info_body" ]] && echo "$old_info_body" >> "$SB_INFO"
+    reset_route_profile
 
     # 部署新协议
     for proto in "${SELECTED_PROTOS[@]}"; do

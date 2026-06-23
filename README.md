@@ -11,7 +11,7 @@
     ╚═══╝   ╚═════╝ ╚══════╝╚══════╝╚═════╝
 ```
 
-[![Version](https://img.shields.io/badge/version-1.4.13-blue.svg)](https://github.com/chnnic/VOLSB)
+[![Version](https://img.shields.io/badge/version-1.4.14-blue.svg)](https://github.com/chnnic/VOLSB)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![sing-box](https://img.shields.io/badge/sing--box-1.13.13-orange.svg)](https://github.com/SagerNet/sing-box)
 
@@ -33,7 +33,7 @@ VOLSB 是一个功能完整的 **sing-box 服务端** 一键部署脚本，支�
 | 多协议支持 | VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS v3 / AnyTLS |
 | 多节点生成 | 每个协议支持同时生成 1-10 个节点（独立 UUID/密码） |
 | 按节点出口 | 每个入站节点组可选择 VPS 直连、AI 分流 + SS 家宽出口，或 AI 分流 + VPS 直连 |
-| UDP 转发 | SS 分流出站使用 sing-box 默认网络能力，支持 UDP relay 的家宽节点可承接 UDP |
+| UDP 分流 | 支持普通 TCP 走 SS 家宽、普通 UDP 走 VPS 直连，绕开家宽 UDP unknown |
 | IPv6 支持 | 入站监听 IPv4/IPv6，分享链接会自动兼容 IPv6 地址格式 |
 | 自动生成密钥 | Reality 密钥对、UUID、ShortID 全自动生成 |
 | 自定义连接地址 | 自动检测公网 IP 或手动输入 IP/DDNS 域名 |
@@ -109,7 +109,7 @@ volsb uninstall      # 完全卸载
 ```
   ██╗   ██╗ ██████╗ ██╗     ███████╗██████╗
   ...
-  v1.4.13  |  2026-06-24 03:00:00
+  v1.4.14  |  2026-06-24 03:15:00
 
   状态: ● 运行中
   版本: 1.13.13
@@ -165,6 +165,7 @@ volsb uninstall      # 完全卸载
  1) 直连 VPS 出口
  2) AI → ss-ai，其余 → ss-home
  3) AI → ss-ai，其余 → 直连 VPS 出口
+ 4) AI → ss-ai，TCP其余 → ss-home，UDP其余 → 直连 VPS 出口
 ```
 
 如果需要一条链接一个出口策略，建议每次生成节点数量填 `1`，再通过菜单 **2) 追加新协议** 一条条生成。这样可以同时保留：
@@ -172,6 +173,7 @@ volsb uninstall      # 完全卸载
 - 直连节点：所有流量走 VPS 本地出口
 - 分流节点：AI 流量走 `ss-ai`，其他流量走 `ss-home`
 - AI 转发节点：AI 流量走 `ss-ai`，其他流量走 VPS 本地出口
+- UDP 直连节点：AI 流量走 `ss-ai`，普通 TCP 走 `ss-home`，普通 UDP 走 VPS 本地出口
 - 分流节点会自动添加 `action: sniff` 路由规则，用于识别 TLS/HTTP 目标域名并命中 AI 规则
 - AnyTLS 可选择 Reality 模式，无需证书，并会生成 `pbk` / `sid` 分享参数
 - AnyTLS 证书模式会生成带 SAN 的自签证书；Let's Encrypt 模式会用证书域名生成连接地址

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.4.13
+#   版本   : 1.4.14
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.4.13"
+VOLSB_VER="1.4.14"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -507,6 +507,7 @@ ROUTE_BASE_OUTBOUNDS_JSON=""
 ROUTE_BASE_ROUTE_JSON=""
 declare -a ROUTE_DIRECT_TAGS=()
 declare -a ROUTE_SPLIT_TAGS=()
+declare -a ROUTE_SPLIT_UDP_DIRECT_TAGS=()
 declare -a ROUTE_SPLIT_DIRECT_TAGS=()
 SELECTED_CERT_DOMAIN=""
 SELECTED_CERT_PATH=""
@@ -1041,6 +1042,7 @@ reset_route_profile() {
     ROUTE_BASE_ROUTE_JSON=""
     ROUTE_DIRECT_TAGS=()
     ROUTE_SPLIT_TAGS=()
+    ROUTE_SPLIT_UDP_DIRECT_TAGS=()
     ROUTE_SPLIT_DIRECT_TAGS=()
 }
 
@@ -1098,6 +1100,17 @@ record_route_ai_direct_info() {
 INFO
 }
 
+record_route_ai_home_udp_direct_info() {
+    cat >> "$SB_INFO" <<INFO
+
+  [分流系统]
+    模式     : AI → SS，TCP 默认 → SS 家宽，UDP 默认 → VPS 直连
+    AI 出口  : ${ROUTE_AI_METHOD} @ ${ROUTE_AI_ADDR}:${ROUTE_AI_PORT} (${ROUTE_AI_TAG})
+    TCP默认  : ${ROUTE_HOME_METHOD} @ ${ROUTE_HOME_ADDR}:${ROUTE_HOME_PORT} (ss-home)
+    UDP默认  : direct
+INFO
+}
+
 ask_inbound_route_mode() {
     local tag="$1" label="${2:-$1}"
     local mode="${VOLSB_ROUTE_MODE:-${VOLSB_ROUTE_PROFILE:-}}"
@@ -1108,7 +1121,8 @@ ask_inbound_route_mode() {
         echo "   1) 直连 VPS 出口"
         echo "   2) AI → ss-ai，其余 → ss-home"
         echo "   3) AI → ss-ai，其余 → 直连 VPS 出口"
-        ask "选择 [1/2/3] 默认1:"; read -r mode
+        echo "   4) AI → ss-ai，TCP其余 → ss-home，UDP其余 → 直连 VPS 出口"
+        ask "选择 [1/2/3/4] 默认1:"; read -r mode
         [[ -z "$mode" ]] && mode="1"
     fi
 
@@ -1123,6 +1137,12 @@ ask_inbound_route_mode() {
             ROUTE_SPLIT_DIRECT_TAGS+=("$tag")
             record_route_ai_direct_info
             info "路由: ${label} → AI 转发 / 默认 VPS 直连"
+            ;;
+        4|ai-ss-udp-direct|udp-direct|split-udp-direct)
+            ensure_route_ss_config || return 1
+            ROUTE_SPLIT_UDP_DIRECT_TAGS+=("$tag")
+            record_route_ai_home_udp_direct_info
+            info "路由: ${label} → AI 分流 / TCP 默认 SS 家宽 / UDP 默认 VPS 直连"
             ;;
         *)
             ROUTE_DIRECT_TAGS+=("$tag")
@@ -1155,6 +1175,12 @@ _replace_first_route_tag() {
             return 0
         fi
     done
+    for i in "${!ROUTE_SPLIT_UDP_DIRECT_TAGS[@]}"; do
+        if [[ "${ROUTE_SPLIT_UDP_DIRECT_TAGS[$i]}" == "$old_tag" ]]; then
+            ROUTE_SPLIT_UDP_DIRECT_TAGS[$i]="$new_tag"
+            return 0
+        fi
+    done
     for i in "${!ROUTE_SPLIT_DIRECT_TAGS[@]}"; do
         if [[ "${ROUTE_SPLIT_DIRECT_TAGS[$i]}" == "$old_tag" ]]; then
             ROUTE_SPLIT_DIRECT_TAGS[$i]="$new_tag"
@@ -1165,7 +1191,7 @@ _replace_first_route_tag() {
 }
 
 build_route_profile_json() {
-    if [[ ${#ROUTE_SPLIT_TAGS[@]} -eq 0 && ${#ROUTE_SPLIT_DIRECT_TAGS[@]} -eq 0 ]]; then
+    if [[ ${#ROUTE_SPLIT_TAGS[@]} -eq 0 && ${#ROUTE_SPLIT_UDP_DIRECT_TAGS[@]} -eq 0 && ${#ROUTE_SPLIT_DIRECT_TAGS[@]} -eq 0 ]]; then
         ROUTE_OUTBOUNDS_JSON='[
     {"type": "direct", "tag": "direct"},
     {"type": "block",  "tag": "block"}
@@ -1176,9 +1202,9 @@ build_route_profile_json() {
         return 0
     fi
 
-    local home_out ai_out domains_json domains suffixes split_tags_json split_direct_tags_json direct_tags_json
+    local home_out ai_out domains_json domains suffixes split_tags_json split_udp_direct_tags_json split_direct_tags_json direct_tags_json
     ai_out=$(_ss_outbound_json "$ROUTE_AI_TAG" "$ROUTE_AI_ADDR" "$ROUTE_AI_PORT" "$ROUTE_AI_METHOD" "$ROUTE_AI_PASS") || return 1
-    if [[ ${#ROUTE_SPLIT_TAGS[@]} -gt 0 ]]; then
+    if [[ ${#ROUTE_SPLIT_TAGS[@]} -gt 0 || ${#ROUTE_SPLIT_UDP_DIRECT_TAGS[@]} -gt 0 ]]; then
         home_out=$(_ss_outbound_json "ss-home" "$ROUTE_HOME_ADDR" "$ROUTE_HOME_PORT" "$ROUTE_HOME_METHOD" "$ROUTE_HOME_PASS") || return 1
         ROUTE_OUTBOUNDS_JSON=$(printf '%s\n%s\n%s\n%s\n' \
             "$ai_out" "$home_out" \
@@ -1199,6 +1225,11 @@ build_route_profile_json() {
     else
         split_tags_json="[]"
     fi
+    if [[ ${#ROUTE_SPLIT_UDP_DIRECT_TAGS[@]} -gt 0 ]]; then
+        split_udp_direct_tags_json=$(printf '%s\n' "${ROUTE_SPLIT_UDP_DIRECT_TAGS[@]}" | jq -R . | jq -s 'unique')
+    else
+        split_udp_direct_tags_json="[]"
+    fi
     if [[ ${#ROUTE_SPLIT_DIRECT_TAGS[@]} -gt 0 ]]; then
         split_direct_tags_json=$(printf '%s\n' "${ROUTE_SPLIT_DIRECT_TAGS[@]}" | jq -R . | jq -s 'unique')
     else
@@ -1216,6 +1247,7 @@ build_route_profile_json() {
         --argjson domains "$domains" \
         --argjson suffixes "$suffixes" \
         --argjson split_tags "$split_tags_json" \
+        --argjson split_udp_direct_tags "$split_udp_direct_tags_json" \
         --argjson split_direct_tags "$split_direct_tags_json" \
         --argjson direct_tags "$direct_tags_json" \
         '(if ($split_tags | length) > 0 then [
@@ -1223,13 +1255,19 @@ build_route_profile_json() {
           {inbound:$split_tags,domain:$domains,domain_suffix:$suffixes,action:"route",outbound:$ai_tag},
           {inbound:$split_tags,action:"route",outbound:$final_tag}
         ] else [] end) as $split_ss_rules
+        | (if ($split_udp_direct_tags | length) > 0 then [
+          {inbound:$split_udp_direct_tags,action:"sniff",timeout:"1s"},
+          {inbound:$split_udp_direct_tags,domain:$domains,domain_suffix:$suffixes,action:"route",outbound:$ai_tag},
+          {inbound:$split_udp_direct_tags,network:"udp",action:"route",outbound:"direct"},
+          {inbound:$split_udp_direct_tags,action:"route",outbound:$final_tag}
+        ] else [] end) as $split_udp_direct_rules
         | (if ($split_direct_tags | length) > 0 then [
           {inbound:$split_direct_tags,action:"sniff",timeout:"1s"},
           {inbound:$split_direct_tags,domain:$domains,domain_suffix:$suffixes,action:"route",outbound:$ai_tag},
           {inbound:$split_direct_tags,action:"route",outbound:$split_direct_final_tag}
         ] else [] end) as $split_direct_rules
         | ($direct_tags | length) as $direct_count
-        | {rules:($split_ss_rules + $split_direct_rules + (if $direct_count > 0 then [{inbound:$direct_tags,action:"route",outbound:"direct"}] else [] end)),
+        | {rules:($split_ss_rules + $split_udp_direct_rules + $split_direct_rules + (if $direct_count > 0 then [{inbound:$direct_tags,action:"route",outbound:"direct"}] else [] end)),
            final:"direct"}')
 }
 

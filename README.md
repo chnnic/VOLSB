@@ -11,7 +11,7 @@
     ╚═══╝   ╚═════╝ ╚══════╝╚══════╝╚═════╝
 ```
 
-[![Version](https://img.shields.io/badge/version-1.4.0-blue.svg)](https://github.com/chnnic/VOLSB)
+[![Version](https://img.shields.io/badge/version-1.4.1-blue.svg)](https://github.com/chnnic/VOLSB)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![sing-box](https://img.shields.io/badge/sing--box-1.13.13-orange.svg)](https://github.com/SagerNet/sing-box)
 
@@ -105,7 +105,7 @@ volsb uninstall      # 完全卸载
 ```
   ██╗   ██╗ ██████╗ ██╗     ███████╗██████╗
   ...
-  v1.4.0  |  2026-06-23 18:00:00
+  v1.4.1  |  2026-06-23 18:00:00
 
   状态: ● 运行中
   版本: 1.13.13
@@ -166,7 +166,7 @@ volsb uninstall      # 完全卸载
 
 - 直连节点：所有流量走 VPS 本地出口
 - 分流节点：AI 流量走 `ss-ai`，其他流量走 `ss-home`
-- 分流节点会自动开启入站 sniff，用于识别 TLS/HTTP 目标域名并命中 AI 规则
+- 分流节点会自动添加 `action: sniff` 路由规则，用于识别 TLS/HTTP 目标域名并命中 AI 规则
 - AnyTLS 可选择 Reality 模式，无需证书，并会生成 `pbk` / `sid` 分享参数
 
 分流模式会要求填写两个 Shadowsocks 链接：

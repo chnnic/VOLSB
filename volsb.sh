@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.4.19
+#   版本   : 1.4.20
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.4.19"
+VOLSB_VER="1.4.20"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -2509,6 +2509,55 @@ SHORTCUT
     info "快捷命令已安装,现在可以输入 ${C_BOLD}volsb${NC} 进入管理界面"
 }
 
+format_nodes_info() {
+    local file="$1"
+    awk '
+        function is_route_header(line) {
+            return line ~ /^  \[(出口系统|分流系统)\]/
+        }
+        function is_block_header(line) {
+            return line ~ /^  \[/
+        }
+        function flush_block(    out) {
+            if (block == "") return
+            if (block_type == "route") {
+                if (node_block != "") {
+                    node_block = node_block "\n" block
+                } else {
+                    pending_route = pending_route block "\n"
+                }
+            } else {
+                if (node_block != "") {
+                    print node_block
+                    print ""
+                }
+                node_block = pending_route block
+                pending_route = ""
+            }
+            block = ""
+            block_type = ""
+        }
+        {
+            if (is_block_header($0)) {
+                flush_block()
+                block = $0
+                block_type = is_route_header($0) ? "route" : "node"
+                next
+            }
+            if (block != "") {
+                block = block "\n" $0
+            } else {
+                print
+            }
+        }
+        END {
+            flush_block()
+            if (node_block != "") print node_block
+            if (pending_route != "") print pending_route
+        }
+    ' "$file"
+}
+
 # ════════════════════════════════════════════════════════════
 #  节点信息展示
 # ════════════════════════════════════════════════════════════
@@ -2559,7 +2608,7 @@ HDR
             warn "建议重新安装以同步节点信息: 菜单选 1"
             echo ""
         fi
-        cat "$SB_INFO"
+        format_nodes_info "$SB_INFO"
     fi
 
     # ── 展示所有分享链接（带编号和二维码）──

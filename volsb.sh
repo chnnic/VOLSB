@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.4.28
+#   版本   : 1.4.29
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS
@@ -30,7 +30,7 @@ banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 is_back_choice() { [[ "${1:-}" =~ ^([bBqQ]|back|BACK|返回)$ ]]; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.4.28"
+VOLSB_VER="1.4.29"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -2767,20 +2767,30 @@ format_nodes_info() {
         function is_block_header(line) {
             return line ~ /^  \[/
         }
-        function flush_block(    out) {
+        function print_node() {
+            if (node_block == "") return
+            print node_block
+            if (route_block != "") {
+                print ""
+                print route_block
+            }
+            node_block = ""
+            route_block = ""
+        }
+        function flush_block() {
             if (block == "") return
             if (block_type == "route") {
                 if (node_block != "") {
-                    node_block = node_block "\n" block
+                    # A node can temporarily record multiple route blocks while
+                    # building the final profile. Show the last one only.
+                    route_block = block
                 } else {
-                    pending_route = pending_route block "\n"
+                    pending_route = block
                 }
             } else {
-                if (node_block != "") {
-                    print node_block
-                    print ""
-                }
-                node_block = pending_route block
+                print_node()
+                node_block = block
+                route_block = pending_route
                 pending_route = ""
             }
             block = ""
@@ -2801,8 +2811,7 @@ format_nodes_info() {
         }
         END {
             flush_block()
-            if (node_block != "") print node_block
-            if (pending_route != "") print pending_route
+            print_node()
         }
     ' "$file"
 }

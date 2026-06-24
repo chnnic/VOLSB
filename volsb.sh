@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.4.16
+#   版本   : 1.4.17
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.4.16"
+VOLSB_VER="1.4.17"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -943,64 +943,54 @@ _ss_outbound_json() {
 
 _ai_default_items() {
     cat <<'EOF'
-openai.com,
-chatgpt.com,
-oaistatic.com,
-oaiusercontent.com,
-claude.ai,
-claude.com,
-clau.de,
-api.anthropic.com,
-cdn.anthropic.com,
-console.anthropic.com,
-mcp.anthropic.com,
-workbench.anthropic.com,
-anthropic.auth0.com,
-anthropic-com.ghost.io,
-anthropic.com,
-anthropic.com.cdn.cloudflare.net,
-claudemcpclient.com,
-claudemcpcontent.com,
-claudeusercontent.com,
-sentry.io,
-statsigapi.net,
-api.statsig.com,
-events.statsigapi.net,
-servd-anthropic-website.b-cdn.net,
-keyword:datadog,
-keyword:sentry,
-keyword:sift,
-perplexity.ai,
-api.perplexity.ai,
-console.perplexity.ai,
-grok.com,
-x.ai,
-api.x.ai,
-console.x.ai,
-mistral.ai,
-chat.mistral.ai,
-api.mistral.ai,
-console.mistral.ai,
-meta.ai,
-ai.meta.com,
-character.ai,
-poe.com,
-api.poe.com,
-cohere.com,
-cohere.ai,
-api.cohere.com,
-api.cohere.ai,
-dashboard.cohere.com,
-huggingface.co,
-hf.co,
-aistudio.google.com,
-generativelanguage.googleapis.com,
-ai.google.dev,
-gemini.google.com,
-midjourney.com,
-alpha.midjourney.com,
-docs.midjourney.com,
-pixpix.com
+geosite:openai,
+geosite:anthropic,
+domain:openai.com,
+domain:chatgpt.com,
+domain:oaistatic.com,
+domain:oaiusercontent.com,
+domain:oaistatsig.com,
+domain:chat.com,
+domain:sora.com,
+domain:chatgpt.livekit.cloud,
+domain:host.livekit.cloud,
+domain:turn.livekit.cloud,
+domain:anthropic.com,
+domain:claude.ai,
+domain:claude.com,
+domain:clau.de,
+domain:anthropic.auth0.com,
+domain:anthropic-com.ghost.io,
+domain:anthropic.com.cdn.cloudflare.net,
+domain:claudemcpclient.com,
+domain:claudemcpcontent.com,
+domain:claudeusercontent.com,
+full:servd-anthropic-website.b-cdn.net,
+domain:statsigapi.net,
+full:api.statsig.com,
+full:o33249.ingest.sentry.io,
+full:browser-intake-datadoghq.com,
+full:rum.browser-intake-datadoghq.com,
+domain:perplexity.ai,
+domain:grok.com,
+domain:x.ai,
+domain:mistral.ai,
+domain:meta.ai,
+domain:ai.meta.com,
+domain:character.ai,
+domain:poe.com,
+domain:cohere.com,
+domain:cohere.ai,
+domain:huggingface.co,
+domain:hf.co,
+domain:huggingfaceusercontent.com,
+domain:hf.space,
+domain:aistudio.google.com,
+domain:generativelanguage.googleapis.com,
+domain:ai.google.dev,
+domain:gemini.google.com,
+domain:midjourney.com,
+domain:pixpix.com
 EOF
 }
 
@@ -1040,6 +1030,14 @@ _ai_domains_json() {
               | sub("^[Dd][Oo][Mm][Aa][Ii][Nn][_-][Kk][Ee][Yy][Ww][Oo][Rr][Dd]:"; "")
               | trim | ascii_downcase) as $keyword
             | if $keyword == "" then . else .keywords += [$keyword] end
+          elif ($item | ascii_downcase | startswith("full:")) then
+            ($item | sub("^[Ff][Uu][Ll][Ll]:"; "") | host) as $domain
+            | if $domain == "" then . else .domains += [$domain] end
+          elif ($item | ascii_downcase | startswith("domain:")) then
+            ($item | sub("^[Dd][Oo][Mm][Aa][Ii][Nn]:"; "") | host) as $domain
+            | if $domain == "" then .
+              else .domains += [$domain] | .suffixes += [("." + $domain)]
+              end
           else
             ($item | host) as $domain
             | if $domain == "" then .

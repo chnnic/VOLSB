@@ -11,7 +11,7 @@
     ╚═══╝   ╚═════╝ ╚══════╝╚══════╝╚═════╝
 ```
 
-[![Version](https://img.shields.io/badge/version-1.4.16-blue.svg)](https://github.com/chnnic/VOLSB)
+[![Version](https://img.shields.io/badge/version-1.4.17-blue.svg)](https://github.com/chnnic/VOLSB)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![sing-box](https://img.shields.io/badge/sing--box-1.13.13-orange.svg)](https://github.com/SagerNet/sing-box)
 
@@ -35,7 +35,7 @@ VOLSB 是一个功能完整的 **sing-box 服务端** 一键部署脚本，支�
 | 按节点出口 | 每个入站节点组可选择 VPS 直连、AI 分流 + SS 家宽出口，或 AI 分流 + VPS 直连 |
 | UDP 分流 | 支持普通 TCP 走 SS 家宽、普通 UDP 走 VPS 直连，绕开家宽 UDP unknown |
 | IPv6 支持 | 入站监听 IPv4/IPv6，分享链接会自动兼容 IPv6 地址格式 |
-| Claude 规则 | 内置 Anthropic / Claude / 监控关键词补充规则，自动随 AI 分流生效 |
+| AI 规则 | 内置 OpenAI / Claude / Gemini / Perplexity 等规则，兼容 `geosite:`、`domain:`、`full:`、`keyword:` |
 | AnyTLS Reality | 输出分享链接和 sing-box 客户端 JSON，兼容不识别 Reality URI 的客户端 |
 | 自动生成密钥 | Reality 密钥对、UUID、ShortID 全自动生成 |
 | 自定义连接地址 | 自动检测公网 IP 或手动输入 IP/DDNS 域名 |
@@ -111,7 +111,7 @@ volsb uninstall      # 完全卸载
 ```
   ██╗   ██╗ ██████╗ ██╗     ███████╗██████╗
   ...
-  v1.4.16  |  2026-06-24 03:45:00
+  v1.4.17  |  2026-06-24 04:00:00
 
   状态: ● 运行中
   版本: 1.13.13

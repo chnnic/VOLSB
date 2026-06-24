@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.4.22
+#   版本   : 1.4.23
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.4.22"
+VOLSB_VER="1.4.23"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -2150,6 +2150,50 @@ HDR
         fi
     }
 
+    choose_relay_inbound_port() {
+        local ports=() port port_type port_tag port_listen
+        while IFS='|' read -r port_type port port_tag port_listen; do
+            [[ -n "$port" && "$port" != "0" ]] || continue
+            [[ "$port_listen" == "127.0.0.1" ]] && continue
+            ports+=("${port}|${port_type}|${port_tag}|${port_listen}")
+        done < <(jq -r '.inbounds[] | [(.type//"unknown"), (.listen_port//0|tostring), (.tag//""), (.listen//"")] | join("|")' "$SB_CONFIG" 2>/dev/null)
+
+        if [[ ${#ports[@]} -eq 0 ]]; then
+            echo ""
+            return 1
+        fi
+
+        echo ""
+        echo "  可选入站端口:"
+        local i=1 item
+        for item in "${ports[@]}"; do
+            IFS='|' read -r port_type port port_tag port_listen <<< "$item"
+            printf "   %d) %-10s 端口:%-8s 标签:%s\n" "$i" "$port_type" "$port" "${port_tag:-无}"
+            (( i++ )) || true
+        done
+
+        local choice=""
+        ask "选择验证端口 [1-${#ports[@]}]，回车默认1，或直接输入端口号:"; read -r choice
+        [[ -z "$choice" ]] && choice="1"
+        if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#ports[@]} )); then
+            IFS='|' read -r port_type port port_tag port_listen <<< "${ports[$(( choice - 1 ))]}"
+            SELECTED_VERIFY_PORT="$port"
+            SELECTED_VERIFY_TYPE="$port_type"
+            SELECTED_VERIFY_TAG="$port_tag"
+            return 0
+        fi
+
+        if [[ "$choice" =~ ^[0-9]+$ ]]; then
+            SELECTED_VERIFY_PORT="$choice"
+            SELECTED_VERIFY_TYPE="manual"
+            SELECTED_VERIFY_TAG=""
+            return 0
+        fi
+
+        err "端口选择无效"
+        return 1
+    }
+
     # ── Step 0: 时间偏差预检 ──
     local ntp_offset=""
     if command -v chronyc &>/dev/null; then
@@ -2202,7 +2246,7 @@ HDR
     land_port=$(jq  -r '.outbounds[] | select(.type=="shadowsocks") | .server_port // ""' "$SB_CONFIG" 2>/dev/null | head -1)
     land_method=$(jq -r '.outbounds[] | select(.type=="shadowsocks") | .method // ""' "$SB_CONFIG" 2>/dev/null | head -1)
     local in_port
-    in_port=$(jq -r '.inbounds[] | select(.type=="vless") | .listen_port // ""' "$SB_CONFIG" 2>/dev/null | head -1)
+    in_port=$(jq -r '.inbounds[] | select((.listen_port // 0) > 0) | .listen_port // ""' "$SB_CONFIG" 2>/dev/null | head -1)
 
     if [[ -z "$land_addr" || -z "$land_port" ]]; then
         echo -e "  ${C_YELLOW}[!]${NC} 当前不是线路机配置（无 Shadowsocks 出站）"
@@ -2211,15 +2255,23 @@ HDR
     fi
 
     echo -e "  ${C_GREEN}[✓]${NC} 线路机配置已找到"
-    echo -e "       入站端口  : ${C_CYAN}${in_port}${NC}"
+    if choose_relay_inbound_port; then
+        echo -e "       入站端口  : ${C_CYAN}${SELECTED_VERIFY_PORT}${NC}"
+        [[ -n "${SELECTED_VERIFY_TYPE:-}" ]] && echo -e "       入站类型  : ${C_CYAN}${SELECTED_VERIFY_TYPE}${NC}"
+        [[ -n "${SELECTED_VERIFY_TAG:-}" ]] && echo -e "       入站标签  : ${C_CYAN}${SELECTED_VERIFY_TAG}${NC}"
+    else
+        [[ -n "$in_port" ]] || { echo -e "       入站端口  : ${C_YELLOW}未找到${NC}"; return; }
+        SELECTED_VERIFY_PORT="$in_port"
+        echo -e "       入站端口  : ${C_CYAN}${SELECTED_VERIFY_PORT}${NC}"
+    fi
     echo -e "       落地机    : ${C_CYAN}${land_addr}:${land_port}${NC} (${land_method})"
 
     # ── Step 3: 端口监听检查 ──
     hr; echo -e "  ${C_BOLD}Step 3 — 端口监听${NC}"; hr
-    if ss -tuln 2>/dev/null | grep -q ":${in_port} "; then
-        echo -e "  ${C_GREEN}[✓]${NC} 入站端口 ${in_port} 正在监听"; (( pass++ )) || true
+    if ss -tuln 2>/dev/null | grep -q ":${SELECTED_VERIFY_PORT} "; then
+        echo -e "  ${C_GREEN}[✓]${NC} 入站端口 ${SELECTED_VERIFY_PORT} 正在监听"; (( pass++ )) || true
     else
-        echo -e "  ${C_RED}[✗]${NC} 入站端口 ${in_port} 未监听"
+        echo -e "  ${C_RED}[✗]${NC} 入站端口 ${SELECTED_VERIFY_PORT} 未监听"
         (( fail++ )) || true
     fi
 

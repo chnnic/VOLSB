@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.4.24
+#   版本   : 1.4.25
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS
@@ -27,9 +27,10 @@ ask()     { printf "${C_YELLOW}[?]${NC} %s" "$*"; }
 die()     { err "$*"; exit 1; }
 hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
+is_back_choice() { [[ "${1:-}" =~ ^([bBqQ]|back|BACK|返回)$ ]]; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.4.24"
+VOLSB_VER="1.4.25"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -438,9 +439,18 @@ select_existing_cert() {
         (( i++ )) || true
     done
     echo "   d) 删除旧证书" >&2
-    printf "${C_YELLOW}[?]${NC} 选择证书 [1-${#certs[@]}] / d删除:" >&2
+    echo "   0) 返回上一级" >&2
+    printf "${C_YELLOW}[?]${NC} 选择证书 [1-${#certs[@]}] / d删除 / 0返回:" >&2
     read -r cert_choice
     [[ -z "$cert_choice" ]] && cert_choice="1"
+    if [[ "$cert_choice" == "0" ]]; then
+        info "已返回上一级"
+        return 1
+    fi
+    if is_back_choice "$cert_choice"; then
+        info "已返回上一级"
+        return 1
+    fi
     if [[ "$cert_choice" == "d" || "$cert_choice" == "D" ]]; then
         delete_existing_cert || true
         select_existing_cert
@@ -482,9 +492,12 @@ delete_existing_cert() {
         printf "   %d) %s\n" "$i" "$domain" >&2
         (( i++ )) || true
     done
-    printf "${C_YELLOW}[?]${NC} 选择要删除的证书 [1-${#certs[@]}]，回车取消:" >&2
+    echo "   0) 返回上一级" >&2
+    printf "${C_YELLOW}[?]${NC} 选择要删除的证书 [1-${#certs[@]}]，回车/0取消:" >&2
     read -r cert_choice
     [[ -z "$cert_choice" ]] && return 0
+    [[ "$cert_choice" == "0" ]] && return 0
+    is_back_choice "$cert_choice" && return 0
     if ! [[ "$cert_choice" =~ ^[0-9]+$ ]] || (( cert_choice < 1 || cert_choice > ${#certs[@]} )); then
         err "证书选择无效"
         return 1
@@ -553,7 +566,10 @@ ask_connect_addr() {
     echo -e "  ${C_BOLD}客户端连接地址${NC}（填入客户端的服务器地址）:"
     echo -e "  ① 自动检测本机公网IP: ${C_CYAN}${auto_ip:-检测失败}${NC}"
     echo    "  ② 手动输入（如有域名/DDNS 可在此填入）"
-    ask "选择 [1/2] 默认1:"; read -r opt
+    echo    "  0) 返回上一级"
+    ask "选择 [0/1/2] 默认1:"; read -r opt
+    [[ "$opt" == "0" ]] && { info "已返回上一级"; return 1; }
+    is_back_choice "$opt" && { info "已返回上一级"; return 1; }
     if [[ "$opt" == "2" ]]; then
         ask "输入 IP 或域名:"; read -r CONNECT_ADDR
         [[ -z "$CONNECT_ADDR" ]] && CONNECT_ADDR="${auto_ip:-127.0.0.1}"
@@ -576,7 +592,10 @@ ask_relay_connect_addr() {
     echo    "  客户端将连接此地址，线路机再转发到落地机"
     echo -e "  ① 自动检测本机公网IP: ${C_CYAN}${auto_ip:-检测失败}${NC}"
     echo    "  ② 手动输入（如有域名/DDNS）"
-    ask "选择 [1/2] 默认1:"; read -r opt
+    echo    "  0) 返回上一级"
+    ask "选择 [0/1/2] 默认1:"; read -r opt
+    [[ "$opt" == "0" ]] && { info "已返回上一级"; return 1; }
+    is_back_choice "$opt" && { info "已返回上一级"; return 1; }
     if [[ "$opt" == "2" ]]; then
         ask "输入线路机 IP 或域名:"; read -r CONNECT_ADDR
         [[ -z "$CONNECT_ADDR" ]] && CONNECT_ADDR="${auto_ip:-127.0.0.1}"
@@ -687,8 +706,14 @@ deploy_hysteria2() {
 
     local masq_domain cert_path key_path insecure="true"
     echo "  TLS 证书:"
-    echo "   1) 自签证书 (客户端需开 insecure)  2) Let's Encrypt 正式证书"
-    ask "选择 [1/2] 默认1:"; read -r cc; [[ -z "$cc" ]] && cc="1"
+    echo "   1) 自签证书 (客户端需开 insecure)"
+    echo "   2) Let's Encrypt 正式证书"
+    echo "   0) 返回上一级"
+    ask "选择 [0/1/2] 默认1:"; read -r cc
+    if [[ "$cc" == "0" ]] || is_back_choice "$cc"; then
+        info "已返回上一级"; return 1
+    fi
+    [[ -z "$cc" ]] && cc="1"
     if [[ "$cc" == "2" ]]; then
         ask "域名:"; read -r masq_domain; [[ -z "$masq_domain" ]] && die "域名不能为空"
         acme_issue "$masq_domain" || return 1
@@ -790,8 +815,15 @@ deploy_trojan() {
     step "配置 Trojan + TLS"
     local port; ask "监听端口 (回车默认443):"; read -r port; [[ -z "$port" ]] && port=443
     local masq_domain cert_path key_path insecure="true"
-    echo "  TLS 证书:  1) 自签  2) Let's Encrypt"
-    ask "选择 [1/2] 默认1:"; read -r cc; [[ -z "$cc" ]] && cc="1"
+    echo "  TLS 证书:"
+    echo "   1) 自签"
+    echo "   2) Let's Encrypt"
+    echo "   0) 返回上一级"
+    ask "选择 [0/1/2] 默认1:"; read -r cc
+    if [[ "$cc" == "0" ]] || is_back_choice "$cc"; then
+        info "已返回上一级"; return 1
+    fi
+    [[ -z "$cc" ]] && cc="1"
     if [[ "$cc" == "2" ]]; then
         ask "域名:"; read -r masq_domain; [[ -z "$masq_domain" ]] && die "域名不能为空"
         acme_issue "$masq_domain" || return 1
@@ -1196,7 +1228,10 @@ ask_inbound_route_mode() {
         echo "   3) AI → ss-ai，其余 → ss-home"
         echo "   4) AI → ss-ai，其余 → 直连 VPS 出口"
         echo "   5) AI → ss-ai，TCP其余 → ss-home，UDP其余 → 直连 VPS 出口"
-        ask "选择 [1/2/3/4/5] 默认1:"; read -r mode
+        echo "   0) 返回上一级"
+        ask "选择 [0-5] 默认1:"; read -r mode
+        [[ "$mode" == "0" ]] && { info "已返回上一级"; return 1; }
+        is_back_choice "$mode" && { info "已返回上一级"; return 1; }
         [[ -z "$mode" ]] && mode="1"
     fi
 
@@ -1413,13 +1448,17 @@ INFOHEADER
     echo "  输入方式:"
     echo "   1) 粘贴 SS 链接  (ss://...)"
     echo "   2) 手动输入"
+    echo "   0) 返回上一级"
     echo ""
 
     # 循环直到得到合法输入
     local ss_link=""
     while true; do
-        ask "选择 [1/2]，或直接粘贴 SS 链接:"; read -r ss_input_raw
+        ask "选择 [0/1/2]，或直接粘贴 SS 链接:"; read -r ss_input_raw
         [[ -z "$ss_input_raw" ]] && ss_input_raw="1"
+        if [[ "$ss_input_raw" == "0" ]] || is_back_choice "$ss_input_raw"; then
+            info "已返回上一级"; return 1
+        fi
 
         if [[ "$ss_input_raw" == ss://* ]]; then
             # 直接粘贴了 SS 链接
@@ -1457,7 +1496,7 @@ INFOHEADER
 
     # ── 线路机入站 (VLESS-Reality) ──
     banner "线路机入站配置"
-    ask_relay_connect_addr  # 获取线路机自身公网IP
+    ask_relay_connect_addr || return 1  # 获取线路机自身公网IP
 
     local in_port sni
     ask "入站端口 (回车随机):"; read -r in_port; [[ -z "$in_port" ]] && in_port=$(random_port)
@@ -1598,7 +1637,11 @@ deploy_anytls() {
     echo "   2) 自签证书 (客户端需开 insecure)"
     echo "   3) Let's Encrypt 正式证书"
     echo "   4) Reality (无需证书,客户端需支持 AnyTLS + Reality)"
-    ask "选择 [1/2/3/4] 默认1:"; read -r cchoice
+    echo "   0) 返回上一级"
+    ask "选择 [0/1/2/3/4] 默认1:"; read -r cchoice
+    if [[ "$cchoice" == "0" ]] || is_back_choice "$cchoice"; then
+        info "已返回上一级"; return 1
+    fi
     [[ -z "$cchoice" ]] && cchoice="1"
 
     if [[ "$cchoice" == "4" ]]; then
@@ -1767,14 +1810,16 @@ BANNER
     hr
     echo ""
     echo -e "  支持多选: ${C_CYAN}1 2${NC}  ${C_CYAN}1 2 4${NC}  ${C_CYAN}0${NC}(全部)"
+    echo -e "  返回上一级: ${C_CYAN}b${NC}"
     echo ""
     # 支持环境变量 VOLSB_PROTO 跳过交互
     local raw_input="${VOLSB_PROTO:-}"
     if [[ -z "$raw_input" ]]; then
-        ask "请选择协议 [0-6]:"; read -r raw_input
+        ask "请选择协议 [0-6 / b返回]:"; read -r raw_input
     else
         info "协议选择 (环境变量): $raw_input"
     fi
+    [[ "$raw_input" =~ ^([bBqQ]|back|BACK|返回)$ ]] && { info "已返回上一级"; return 1; }
     [[ -z "$raw_input" ]] && raw_input="1"
     [[ "$raw_input" == "0" ]] && raw_input="1 2 3 4 5 6"
 
@@ -1790,7 +1835,7 @@ BANNER
             *) warn "忽略无效输入: $n" ;;
         esac
     done
-    [[ ${#SELECTED_PROTOS[@]} -eq 0 ]] && die "未选择任何协议"
+    [[ ${#SELECTED_PROTOS[@]} -eq 0 ]] && { warn "未选择任何协议"; return 1; }
 }
 
 # ────── 写入配置的公共函数 ──────
@@ -1883,7 +1928,10 @@ append_and_write_config() {
         echo "  选项:"
         echo "   1) 保留旧节点，追加新节点（推荐）"
         echo "   2) 清除旧节点，只保留新节点"
-        ask "选择 [1/2] 默认1:"; read -r keep_choice
+        echo "   0) 返回上一级"
+        ask "选择 [0/1/2] 默认1:"; read -r keep_choice
+        [[ "$keep_choice" == "0" ]] && { info "已返回上一级"; return 1; }
+        is_back_choice "$keep_choice" && { info "已返回上一级"; return 1; }
         [[ "${keep_choice:-1}" == "2" ]] && keep_old=false
     fi
 
@@ -2151,6 +2199,7 @@ HDR
     }
 
     choose_relay_inbound_port() {
+        SELECTED_VERIFY_BACK=0
         local ports=() port port_type port_tag port_listen
         while IFS='|' read -r port_type port port_tag port_listen; do
             [[ -n "$port" && "$port" != "0" ]] || continue
@@ -2173,8 +2222,10 @@ HDR
         done
 
         local choice=""
-        ask "选择验证端口 [1-${#ports[@]}]，回车默认1，或直接输入端口号:"; read -r choice
+        ask "选择验证端口 [1-${#ports[@]}]，0返回，回车默认1，或直接输入端口号:"; read -r choice
         [[ -z "$choice" ]] && choice="1"
+        [[ "$choice" == "0" ]] && { SELECTED_VERIFY_BACK=1; info "已返回上一级"; return 1; }
+        is_back_choice "$choice" && { SELECTED_VERIFY_BACK=1; info "已返回上一级"; return 1; }
         if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#ports[@]} )); then
             IFS='|' read -r port_type port port_tag port_listen <<< "${ports[$(( choice - 1 ))]}"
             SELECTED_VERIFY_PORT="$port"
@@ -2216,17 +2267,19 @@ HDR
             (( i++ )) || true
         done
         [[ ${#outbounds[@]} -gt 1 ]] && echo "   0) 全部出站"
+        echo "   b) 返回上一级"
 
         local choice default_choice
         default_choice="1"
         [[ ${#outbounds[@]} -gt 1 ]] && default_choice="0"
         if [[ ${#outbounds[@]} -gt 1 ]]; then
-            ask "选择出站 [0-${#outbounds[@]}]，0全部，回车默认${default_choice}:"
+            ask "选择出站 [0-${#outbounds[@]}]，0全部 / b返回，回车默认${default_choice}:"
         else
-            ask "选择出站 [1-${#outbounds[@]}]，回车默认${default_choice}:"
+            ask "选择出站 [1-${#outbounds[@]}]，b返回，回车默认${default_choice}:"
         fi
         read -r choice
         [[ -z "$choice" ]] && choice="$default_choice"
+        [[ "$choice" =~ ^([bBqQ]|back|BACK|返回)$ ]] && { info "已返回上一级"; return 1; }
 
         SELECTED_VERIFY_OUTBOUNDS=()
         if [[ "$choice" == "0" && ${#outbounds[@]} -gt 1 ]]; then
@@ -2455,6 +2508,7 @@ HDR
         [[ -n "${SELECTED_VERIFY_TYPE:-}" ]] && echo -e "       入站类型  : ${C_CYAN}${SELECTED_VERIFY_TYPE}${NC}"
         [[ -n "${SELECTED_VERIFY_TAG:-}" ]] && echo -e "       入站标签  : ${C_CYAN}${SELECTED_VERIFY_TAG}${NC}"
     else
+        [[ "${SELECTED_VERIFY_BACK:-0}" == "1" ]] && return 0
         [[ -n "$in_port" ]] || { echo -e "       入站端口  : ${C_YELLOW}未找到${NC}"; return; }
         SELECTED_VERIFY_PORT="$in_port"
         echo -e "       入站端口  : ${C_CYAN}${SELECTED_VERIFY_PORT}${NC}"
@@ -2865,8 +2919,10 @@ delete_node() {
         | "  \(.key + 1)) \(.value.type) 端口:\(.value.port) [\(.value.tag)]\(.value.detour // "" | if . == "" then "" else " -> detour:" + . end)"
     '
     echo ""
-    ask "输入要删除的节点序号,回车取消:"; read -r del_idx
+    ask "输入要删除的节点序号，回车/0/b返回:"; read -r del_idx
     [[ -z "$del_idx" ]] && { info "已取消"; return 0; }
+    [[ "$del_idx" == "0" ]] && { info "已返回上一级"; return 0; }
+    is_back_choice "$del_idx" && { info "已返回上一级"; return 0; }
     [[ "$del_idx" =~ ^[0-9]+$ ]] || { warn "请输入有效序号"; return 1; }
     (( del_idx >= 1 && del_idx <= item_count )) || { warn "序号超出范围"; return 1; }
 
@@ -2941,7 +2997,10 @@ reset_ports() {
     echo "   1) 仅重置端口"
     echo "   2) 仅重置密码/UUID"
     echo "   3) 同时重置端口和密码/UUID"
-    ask "选择 [1-3] 默认3:"; read -r reset_opt
+    echo "   0) 返回上一级"
+    ask "选择 [0-3] 默认3:"; read -r reset_opt
+    [[ "$reset_opt" == "0" ]] && { info "已返回上一级"; return 0; }
+    is_back_choice "$reset_opt" && { info "已返回上一级"; return 0; }
     [[ -z "$reset_opt" ]] && reset_opt="3"
 
     local backup; backup=$(mktemp)
@@ -3024,7 +3083,10 @@ LOGO
     if [[ -n "${VOLSB_MODE:-}" ]]; then
         DEPLOY_MODE="$VOLSB_MODE"; return
     fi
-    ask "选择模式 [1/2] 默认1:"; read -r _mode
+    echo "   0) 返回上一级"
+    ask "选择模式 [0/1/2] 默认1:"; read -r _mode
+    [[ "$_mode" == "0" ]] && { info "已返回上一级"; return 1; }
+    is_back_choice "$_mode" && { info "已返回上一级"; return 1; }
     [[ -z "$_mode" ]] && _mode="1"
     DEPLOY_MODE="$_mode"
 }
@@ -3062,7 +3124,7 @@ do_install() {
 
     # 节点信息文件由 assemble_and_write_config 统一写入，此处无需初始化
 
-    select_deploy_mode
+    select_deploy_mode || return 0
 
     if [[ "$DEPLOY_MODE" == "2" ]]; then
         # 线路机模式
@@ -3070,8 +3132,8 @@ do_install() {
         assemble_relay_check || return 1
     else
         # 部署机模式
-        ask_connect_addr
-        select_protocols
+        ask_connect_addr || return 0
+        select_protocols || return 1
         assemble_and_write_config || return 1
     fi
 
@@ -3239,14 +3301,16 @@ do_update_menu() {
     printf "  ${C_BOLD}%-5s${NC} %s\n" "1)" "更新 VOLSB 脚本  (当前 v${VOLSB_VER})"
     printf "  ${C_BOLD}%-5s${NC} %s\n" "2)" "升级 sing-box 核心版本"
     printf "  ${C_BOLD}%-5s${NC} %s\n" "3)" "全部更新"
-    printf "  ${C_BOLD}%-5s${NC} %s\n" "0)" "取消"
+    printf "  ${C_BOLD}%-5s${NC} %s\n" "0)" "返回上一级"
     hr
     ask "选择 [0-3]:"; read -r uc
+    [[ "$uc" == "0" ]] && { info "已返回上一级"; return 0; }
+    is_back_choice "$uc" && { info "已返回上一级"; return 0; }
     case "$uc" in
         1) do_update_script ;;
         2) do_update_singbox ;;
         3) do_update_script; do_update_singbox ;;
-        *) info "已取消" ;;
+        *) info "已返回上一级" ;;
     esac
 }
 
@@ -3321,8 +3385,12 @@ LOGO
 
         case "$opt" in
             1)  do_install || true ;;
-            2)  require_root; ask_connect_addr; select_protocols
-                if append_and_write_config; then
+            2)  require_root
+                if ! ask_connect_addr; then
+                    info "已返回主菜单"
+                elif ! select_protocols; then
+                    info "已返回主菜单"
+                elif append_and_write_config; then
                     svc_restart && { info "配置已更新"; show_nodes; } || true
                 else
                     err "配置未更新，请根据上方错误重新操作"
@@ -3338,7 +3406,9 @@ LOGO
                 echo -e "  ${C_BOLD}节点管理${NC}"
                 echo "   1) 删除节点"
                 echo "   0) 返回"
-                ask "请选择 [0/1]:"; read -r node_opt
+                echo "   b) 返回"
+                ask "请选择 [0/1/b]:"; read -r node_opt
+                is_back_choice "$node_opt" && node_opt="0"
                 case "$node_opt" in
                     1) delete_node || true ;;
                     *) : ;;
@@ -3424,7 +3494,7 @@ main() {
 ==============================================
 HDR
             parse_relay_args "$@"
-            ask_connect_addr
+            ask_connect_addr || exit 0
             deploy_relay || exit 1
             assemble_relay_check || exit 1
             svc_start; sleep 2

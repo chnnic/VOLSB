@@ -11,7 +11,7 @@
     ╚═══╝   ╚═════╝ ╚══════╝╚══════╝╚═════╝
 ```
 
-[![Version](https://img.shields.io/badge/version-1.4.26-blue.svg)](https://github.com/chnnic/VOLSB)
+[![Version](https://img.shields.io/badge/version-1.4.27-blue.svg)](https://github.com/chnnic/VOLSB)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![sing-box](https://img.shields.io/badge/sing--box-1.13.13-orange.svg)](https://github.com/SagerNet/sing-box)
 
@@ -114,7 +114,7 @@ volsb uninstall      # 完全卸载
 ```
   ██╗   ██╗ ██████╗ ██╗     ███████╗██████╗
   ...
-  v1.4.26  |  2026-06-24 04:35:00
+  v1.4.27  |  2026-06-24 04:35:00
 
   状态: ● 运行中
   版本: 1.13.13

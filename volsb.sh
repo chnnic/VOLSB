@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.4.21
+#   版本   : 1.4.22
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.4.21"
+VOLSB_VER="1.4.22"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -334,17 +334,30 @@ load_env() {
 # ──────────────────────── acme.sh Let's Encrypt ────────────────────────
 acme_has_domain() {
     local domain="$1"
-    [[ -d "$HOME/.acme.sh/${domain}_ecc" || -d "$HOME/.acme.sh/${domain}" ]]
+    [[ -f "$HOME/.acme.sh/${domain}_ecc/${domain}.cer" || -f "$HOME/.acme.sh/${domain}_ecc/fullchain.cer" || \
+       -f "$HOME/.acme.sh/${domain}/${domain}.cer" || -f "$HOME/.acme.sh/${domain}/fullchain.cer" ]]
+}
+
+domain_has_aaaa() {
+    local domain="$1"
+    command -v getent &>/dev/null || return 1
+    getent ahostsv6 "$domain" 2>/dev/null | awk '{print $1}' | grep -q ':' \
+        || getent ahosts "$domain" 2>/dev/null | awk '{print $1}' | grep -q ':'
 }
 
 acme_install_cert() {
     local domain="$1"
     local crt="${SB_CERT_DIR}/${domain}.crt"
     local key="${SB_CERT_DIR}/${domain}.key"
+    if ! acme_has_domain "$domain"; then
+        err "acme.sh 中未找到完整证书: $domain"
+        return 1
+    fi
     ~/.acme.sh/acme.sh --install-cert -d "$domain" --ecc \
         --fullchain-file "$crt" --key-file "$key" \
         --reloadcmd "$(command -v bash) $(readlink -f "$0") restart" \
-        || die "证书安装失败 — 请确认: ① 域名已解析到本机 ② 80端口未被占用 ③ acme.sh 中已有该域名证书"
+        || { err "证书安装失败 — 请确认: ① 域名已解析到本机 ② 80端口未被占用 ③ acme.sh 中已有该域名证书"; return 1; }
+    [[ -s "$crt" && -s "$key" ]] || { err "证书文件不完整: $crt / $key"; return 1; }
     info "证书已安装(fullchain): $crt"
 }
 
@@ -354,15 +367,28 @@ acme_issue() {
     local key="${SB_CERT_DIR}/${domain}.key"
     [[ -f "$crt" && -f "$key" ]] && { info "证书已存在,跳过申请"; return; }
     info "申请或复用 Let's Encrypt 证书 (域名: $domain)..."
+    open_port 80 tcp
     svc_stop 2>/dev/null || true
     [[ -f ~/.acme.sh/acme.sh ]] || \
         curl -fsSL https://get.acme.sh | sh -s "email=acme@${domain}" >/dev/null 2>&1 \
         || die "acme.sh 安装失败"
     ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt >/dev/null 2>&1
-    if ! ~/.acme.sh/acme.sh --issue -d "$domain" --standalone -k ec-256 --httpport 80; then
-        warn "证书未重新签发，尝试安装 acme.sh 中已有证书..."
+    local force_args=()
+    if ! acme_has_domain "$domain" && [[ -d "$HOME/.acme.sh/${domain}_ecc" || -d "$HOME/.acme.sh/${domain}" ]]; then
+        warn "检测到旧的未完成证书记录，强制重新签发..."
+        force_args+=(--force)
     fi
-    acme_install_cert "$domain"
+    if ! ~/.acme.sh/acme.sh --issue -d "$domain" --standalone -k ec-256 --httpport 80 "${force_args[@]}"; then
+        if domain_has_aaaa "$domain"; then
+            warn "检测到 AAAA 记录，尝试使用 IPv6 standalone 重新申请..."
+            ~/.acme.sh/acme.sh --issue -d "$domain" --standalone -k ec-256 --httpport 80 --listen-v6 --force || {
+                warn "IPv6 申请仍失败，尝试安装 acme.sh 中已有证书..."
+            }
+        else
+            warn "证书未重新签发，尝试安装 acme.sh 中已有证书..."
+        fi
+    fi
+    acme_install_cert "$domain" || return 1
 }
 
 collect_reusable_cert_domains() {
@@ -665,7 +691,7 @@ deploy_hysteria2() {
     ask "选择 [1/2] 默认1:"; read -r cc; [[ -z "$cc" ]] && cc="1"
     if [[ "$cc" == "2" ]]; then
         ask "域名:"; read -r masq_domain; [[ -z "$masq_domain" ]] && die "域名不能为空"
-        acme_issue "$masq_domain"
+        acme_issue "$masq_domain" || return 1
         cert_path="${SB_CERT_DIR}/${masq_domain}.crt"
         key_path="${SB_CERT_DIR}/${masq_domain}.key"
         insecure="false"
@@ -768,7 +794,7 @@ deploy_trojan() {
     ask "选择 [1/2] 默认1:"; read -r cc; [[ -z "$cc" ]] && cc="1"
     if [[ "$cc" == "2" ]]; then
         ask "域名:"; read -r masq_domain; [[ -z "$masq_domain" ]] && die "域名不能为空"
-        acme_issue "$masq_domain"
+        acme_issue "$masq_domain" || return 1
         cert_path="${SB_CERT_DIR}/${masq_domain}.crt"
         key_path="${SB_CERT_DIR}/${masq_domain}.key"
         insecure="false"
@@ -1589,7 +1615,7 @@ deploy_anytls() {
     elif [[ "$cchoice" == "3" ]]; then
         ask "域名:"; read -r masq_domain
         [[ -z "$masq_domain" ]] && { err "域名不能为空"; return 1; }
-        acme_issue "$masq_domain"
+        acme_issue "$masq_domain" || return 1
         cert_path="${SB_CERT_DIR}/${masq_domain}.crt"
         key_path="${SB_CERT_DIR}/${masq_domain}.key"
         insecure="false"
@@ -1610,9 +1636,11 @@ deploy_anytls() {
         fi
         if acme_has_domain "$masq_domain"; then
             info "检测到 acme.sh 证书记录，重新安装 fullchain..."
-            acme_install_cert "$masq_domain"
+            acme_install_cert "$masq_domain" || return 1
             cert_path="${SB_CERT_DIR}/${masq_domain}.crt"
             key_path="${SB_CERT_DIR}/${masq_domain}.key"
+        elif [[ -d "$HOME/.acme.sh/${masq_domain}_ecc" || -d "$HOME/.acme.sh/${masq_domain}" ]]; then
+            warn "检测到 acme.sh 目录但没有完整证书文件，已跳过复用"
         fi
         insecure="false"
         link_addr="$masq_domain"

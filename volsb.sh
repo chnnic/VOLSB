@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.4.15
+#   版本   : 1.4.16
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.4.15"
+VOLSB_VER="1.4.16"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -1615,9 +1615,26 @@ deploy_anytls() {
         ALL_LINKS+=("$link")
         local reality_info=""
         if [[ "$tls_mode" == "reality" ]]; then
+            local client_server="$link_addr"
+            [[ "$client_server" == \[*\] && "$client_server" == *\] ]] && client_server="${client_server#[}"
+            client_server="${client_server%]}"
+            local client_json
+            client_json=$(jq -n \
+                --arg tag "VOLSB-AnyTLS-${i}" \
+                --arg server "$client_server" \
+                --argjson port "$port" \
+                --arg password "$pwd" \
+                --arg sni "$masq_domain" \
+                --arg public_key "$reality_pub_key" \
+                --arg short_id "$short_id" \
+                '{type:"anytls",tag:$tag,server:$server,server_port:$port,password:$password,
+                  tls:{enabled:true,server_name:$sni,utls:{enabled:true,fingerprint:"chrome"},
+                  reality:{enabled:true,public_key:$public_key,short_id:$short_id}}}' 2>/dev/null)
             reality_info="    Reality  : yes
     PublicKey: ${reality_pub_key}
-    ShortID  : ${short_id}"
+    ShortID  : ${short_id}
+    客户端JSON:
+${client_json}"
         fi
 
         cat >> "$SB_INFO" <<INFO

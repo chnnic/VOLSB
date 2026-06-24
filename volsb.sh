@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.4.25
+#   版本   : 1.4.26
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS
@@ -30,7 +30,7 @@ banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 is_back_choice() { [[ "${1:-}" =~ ^([bBqQ]|back|BACK|返回)$ ]]; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.4.25"
+VOLSB_VER="1.4.26"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -633,7 +633,7 @@ deploy_vless_reality() {
     else
         echo ""
         echo "  SNI 用于伪装 TLS 握手,建议选目标国大型网站:"
-        echo "  推荐: www.cloudflare.com / www.microsoft.com / www.apple.com / dl.google.com"
+        echo "  推荐: www.cloudflare.com / www.microsoft.com / www.apple.com / www.icloud.com"
         ask "输入 SNI [默认 www.cloudflare.com]:"; read -r sni
         [[ -z "$sni" ]] && sni="www.cloudflare.com"
     fi
@@ -1649,7 +1649,7 @@ deploy_anytls() {
         insecure="false"
         echo ""
         echo "  Reality SNI 用于伪装 TLS 握手,建议选目标国大型网站:"
-        echo "  推荐: www.cloudflare.com / www.microsoft.com / www.apple.com / dl.google.com"
+        echo "  推荐: www.cloudflare.com / www.microsoft.com / www.apple.com / www.icloud.com"
         ask "输入 SNI [默认 www.cloudflare.com]:"; read -r masq_domain
         [[ -z "$masq_domain" ]] && masq_domain="www.cloudflare.com"
         local keypair; keypair=$("$SB_BIN" generate reality-keypair)
@@ -3504,7 +3504,8 @@ HDR
         add)
             require_root
             [[ -f "$SB_CONFIG" ]] || die "请先安装"
-            ask_connect_addr; select_protocols
+            ask_connect_addr || exit 0
+            select_protocols || exit 0
             if append_and_write_config; then
                 svc_restart && { info "已更新并重启"; show_nodes; }
             else

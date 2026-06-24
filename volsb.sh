@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.4.20
+#   版本   : 1.4.21
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.4.20"
+VOLSB_VER="1.4.21"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -1784,13 +1784,13 @@ _write_config() {
   "route": ${ROUTE_CONFIG_JSON}
 }
 JSON
+    # 先注入统计 API，再做最终校验，避免校验后又改动配置。
+    traffic_init_api || return 1
     if "$SB_BIN" check -c "$SB_CONFIG" 2>/dev/null; then
         info "配置写入完成，校验通过"
     else
         err "配置校验失败:"; "$SB_BIN" check -c "$SB_CONFIG"; return 1
     fi
-    # 自动注入流量统计 API
-    traffic_init_api
 }
 
 # ────── 初始化节点信息头 ──────
@@ -1953,23 +1953,47 @@ append_and_write_config() {
 #  流量统计
 # ════════════════════════════════════════════════════════════
 
-# sing-box 启用 ClashAPI 后可通过 REST 查询连接/流量
-# 这里用 /proc/net 统计全量入出流量作为轻量实现
+# sing-box 启用 Clash API 后可通过 REST 查询连接/流量
+# 同时使用 /proc/net 做端口连接数和网卡统计兜底
 
-SB_STAT_API="127.0.0.1:8080"  # sing-box 统计 API 监听地址
+SB_STAT_API="127.0.0.1:9090"  # sing-box Clash API 监听地址
 
 traffic_init_api() {
-    # 注入 Clash 兼容 API（HTTP，sing-box 全版本支持，用于流量统计）
-    if ! jq -e '.experimental.clash_api' "$SB_CONFIG" &>/dev/null; then
-        local tmp; tmp=$(mktemp)
-        jq '.experimental = (.experimental // {}) + {
-            "clash_api": {
-                "external_controller": "127.0.0.1:9090",
-                "secret": ""
-            }
-        }' "$SB_CONFIG" > "$tmp" && mv "$tmp" "$SB_CONFIG"
-        info "已启用 Clash API (127.0.0.1:9090)"
+    # 幂等修复 Clash 兼容 API（HTTP，用于连接/流量统计）
+    [[ -f "$SB_CONFIG" ]] || return 0
+
+    local current api_type
+    current=$(jq -r '.experimental.clash_api.external_controller // ""' "$SB_CONFIG" 2>/dev/null || echo "")
+    api_type=$(jq -r '(.experimental.clash_api // empty) | type' "$SB_CONFIG" 2>/dev/null || echo "")
+    if [[ "$current" == "$SB_STAT_API" && "$api_type" == "object" ]]; then
+        return 0
     fi
+
+    local tmp; tmp=$(mktemp)
+    if ! jq --arg controller "$SB_STAT_API" '
+        .experimental = (if (.experimental | type) == "object" then .experimental else {} end)
+        | (if (.experimental.clash_api | type) == "object" then .experimental.clash_api else {} end) as $old_api
+        | .experimental.clash_api = (
+            $old_api + {
+                "external_controller": $controller,
+                "secret": ($old_api.secret // "")
+            }
+        )
+    ' "$SB_CONFIG" > "$tmp"; then
+        rm -f "$tmp"
+        err "Clash API 配置写入失败"
+        return 1
+    fi
+
+    if [[ -x "$SB_BIN" ]] && ! "$SB_BIN" check -c "$tmp" &>/dev/null; then
+        err "注入 Clash API 后配置校验失败，已保留原配置"
+        "$SB_BIN" check -c "$tmp" || true
+        rm -f "$tmp"
+        return 1
+    fi
+
+    mv "$tmp" "$SB_CONFIG"
+    info "已启用/修复 Clash API (${SB_STAT_API})"
 }
 
 human_bytes() {
@@ -1977,14 +2001,30 @@ human_bytes() {
     local b
     b=$(echo "${1:-0}" | tr -d '[:space:]')
     b=$(( b + 0 )) 2>/dev/null || b=0
-    if   [[ $b -ge 1073741824 ]]; then printf "%.2f GB" "$(echo "scale=2; $b/1073741824" | bc)"
-    elif [[ $b -ge 1048576 ]];    then printf "%.2f MB" "$(echo "scale=2; $b/1048576" | bc)"
-    elif [[ $b -ge 1024 ]];       then printf "%.2f KB" "$(echo "scale=2; $b/1024" | bc)"
-    else printf "%d B" "$b"; fi
+    awk -v b="$b" 'BEGIN {
+        if (b >= 1073741824)      printf "%.2f GB", b / 1073741824;
+        else if (b >= 1048576)    printf "%.2f MB", b / 1048576;
+        else if (b >= 1024)       printf "%.2f KB", b / 1024;
+        else                      printf "%d B", b;
+    }'
 }
 
 # 清洗数值：去换行空格，转整数，出错返回0
 clean_num() { local v; v=$(echo "${1:-0}" | tr -d '[:space:]'); echo $(( v + 0 )) 2>/dev/null || echo 0; }
+
+traffic_api_ready() {
+    local api="${1:-}"
+    [[ -n "$api" ]] || return 1
+    curl -fsSL --connect-timeout 1 --max-time 2 "http://${api}/version" &>/dev/null \
+        || curl -fsSL --connect-timeout 1 --max-time 2 "http://${api}/connections" &>/dev/null
+}
+
+traffic_api_snapshot() {
+    local api="${1:-}"
+    [[ -n "$api" ]] || return 1
+    curl -fsSN --connect-timeout 1 --max-time 3 "http://${api}/traffic" 2>/dev/null \
+        | awk '/^[[:space:]]*\{/{line=$0} END{print line}'
+}
 
 # ════════════════════════════════════════════════════════════
 #  时间同步
@@ -2367,41 +2407,44 @@ HDR
 
     [[ ! -f "$SB_CONFIG" ]] && { warn "配置文件不存在"; return; }
 
-    local clash_api
+    local clash_api api_changed=0
     clash_api=$(jq -r '.experimental.clash_api.external_controller // ""' "$SB_CONFIG" 2>/dev/null)
 
     # ── Clash API 实时速率 ──
-    # 若配置里没有 Clash API，自动注入并重启
-    if [[ -z "$clash_api" ]]; then
-        info "检测到未配置 Clash API，自动注入中..."
-        traffic_init_api
-        clash_api=$(jq -r '.experimental.clash_api.external_controller // ""' "$SB_CONFIG" 2>/dev/null)
+    # 若配置里没有 Clash API 或端口不一致，自动修复并重启
+    if [[ "$clash_api" != "$SB_STAT_API" ]]; then
+        info "检测到 Clash API 未配置或端口不一致，自动修复中..."
+        if traffic_init_api; then
+            clash_api=$(jq -r '.experimental.clash_api.external_controller // ""' "$SB_CONFIG" 2>/dev/null)
+            api_changed=1
+        else
+            warn "Clash API 自动修复失败，将只显示 /proc 兜底统计"
+        fi
+    fi
+
+    if [[ "$api_changed" -eq 1 && -n "$clash_api" ]]; then
         svc_restart 2>/dev/null || true
         sleep 2
     fi
 
-    if [[ -n "$clash_api" ]] && curl -fsSL --max-time 2 "http://${clash_api}/version" &>/dev/null; then
+    if traffic_api_ready "$clash_api"; then
         echo -e "  ${C_BOLD}实时速率 (Clash API):${NC}"
         hr
 
-        # 采样2次取速率差值（更准确）
-        local t1_up t1_down t2_up t2_down
-        local traffic1; traffic1=$(curl -fsSL --max-time 2 "http://${clash_api}/traffic" 2>/dev/null | tail -1)
-        t1_up=$(echo   "$traffic1" | jq -r '.up   // 0' 2>/dev/null | tr -d '[:space:]'); t1_up=$(( ${t1_up:-0}+0 ))
-        t1_down=$(echo "$traffic1" | jq -r '.down // 0' 2>/dev/null | tr -d '[:space:]'); t1_down=$(( ${t1_down:-0}+0 ))
-
-        sleep 1
-
-        local traffic2; traffic2=$(curl -fsSL --max-time 2 "http://${clash_api}/traffic" 2>/dev/null | tail -1)
-        t2_up=$(echo   "$traffic2" | jq -r '.up   // 0' 2>/dev/null | tr -d '[:space:]'); t2_up=$(( ${t2_up:-0}+0 ))
-        t2_down=$(echo "$traffic2" | jq -r '.down // 0' 2>/dev/null | tr -d '[:space:]'); t2_down=$(( ${t2_down:-0}+0 ))
-
-        printf "  ↑ 上行: ${C_YELLOW}%s/s${NC}   ↓ 下行: ${C_GREEN}%s/s${NC}\n" \
-            "$(human_bytes $t1_up)" "$(human_bytes $t1_down)"
+        local t_up=0 t_down=0 traffic_json
+        traffic_json=$(traffic_api_snapshot "$clash_api")
+        if [[ -n "$traffic_json" ]] && echo "$traffic_json" | jq -e . &>/dev/null; then
+            t_up=$(echo   "$traffic_json" | jq -r '.up   // 0' 2>/dev/null | tr -d '[:space:]'); t_up=$(( ${t_up:-0}+0 ))
+            t_down=$(echo "$traffic_json" | jq -r '.down // 0' 2>/dev/null | tr -d '[:space:]'); t_down=$(( ${t_down:-0}+0 ))
+            printf "  ↑ 上行: ${C_YELLOW}%s/s${NC}   ↓ 下行: ${C_GREEN}%s/s${NC}\n" \
+                "$(human_bytes "$t_up")" "$(human_bytes "$t_down")"
+        else
+            warn "Clash API 已连接，但 /traffic 暂无有效数据"
+        fi
 
         # 活跃连接数
         local conns_raw conn_count
-        conns_raw=$(curl -fsSL --max-time 2 "http://${clash_api}/connections" 2>/dev/null)
+        conns_raw=$(curl -fsSL --connect-timeout 1 --max-time 2 "http://${clash_api}/connections" 2>/dev/null)
         conn_count=$(echo "$conns_raw" | jq '.connections | length' 2>/dev/null | tr -d '[:space:]') || conn_count=0
         conn_count=$(( ${conn_count:-0}+0 ))
         echo -e "  活跃连接: ${C_CYAN}${conn_count}${NC} 个"
@@ -2416,8 +2459,8 @@ HDR
         fi
         hr
     else
-        warn "Clash API 暂不可用，服务可能刚重启，请稍后再试"
-        echo -e "  ${C_DIM}或执行: volsb restart${NC}"
+        warn "Clash API 暂不可用，下面继续显示 /proc 端口连接数和网卡流量"
+        echo -e "  ${C_DIM}提示: 如刚更新脚本，可执行 volsb restart 后再查看实时速率${NC}"
         hr
     fi
 

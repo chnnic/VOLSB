@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.4.27
+#   版本   : 1.4.28
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS
@@ -30,7 +30,7 @@ banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 is_back_choice() { [[ "${1:-}" =~ ^([bBqQ]|back|BACK|返回)$ ]]; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.4.27"
+VOLSB_VER="1.4.28"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -553,6 +553,86 @@ SELECTED_CERT_DOMAIN=""
 SELECTED_CERT_PATH=""
 SELECTED_CERT_KEY_PATH=""
 
+select_tls_cert_mode() {
+    local label="${1:-TLS}"
+    local choice
+    SELECTED_TLS_DOMAIN=""
+    SELECTED_TLS_CERT_PATH=""
+    SELECTED_TLS_KEY_PATH=""
+    SELECTED_TLS_INSECURE="true"
+    SELECTED_TLS_LINK_ADDR=""
+
+    echo "  ${label}:"
+    echo "   1) 复用已有证书"
+    echo "   2) 自签证书 (客户端需开 insecure)"
+    echo "   3) Let's Encrypt 正式证书"
+    echo "   0) 返回上一级"
+    ask "选择 [0/1/2/3] 默认1:"; read -r choice
+    if [[ "$choice" == "0" ]] || is_back_choice "$choice"; then
+        info "已返回上一级"; return 1
+    fi
+    [[ -z "$choice" ]] && choice="1"
+    select_tls_cert_mode_from_choice "$choice"
+}
+
+select_tls_cert_mode_from_choice() {
+    local choice="$1"
+    local domain pair
+    SELECTED_TLS_DOMAIN=""
+    SELECTED_TLS_CERT_PATH=""
+    SELECTED_TLS_KEY_PATH=""
+    SELECTED_TLS_INSECURE="true"
+    SELECTED_TLS_LINK_ADDR=""
+
+    case "$choice" in
+        1)
+            select_existing_cert || return 1
+            domain="$SELECTED_CERT_DOMAIN"
+            SELECTED_TLS_CERT_PATH="$SELECTED_CERT_PATH"
+            SELECTED_TLS_KEY_PATH="$SELECTED_CERT_KEY_PATH"
+            if [[ -z "$domain" || -z "$SELECTED_TLS_CERT_PATH" || -z "$SELECTED_TLS_KEY_PATH" ]]; then
+                err "证书选择失败，请重新选择"
+                return 1
+            fi
+            if acme_has_domain "$domain"; then
+                info "检测到 acme.sh 证书记录，重新安装 fullchain..."
+                acme_install_cert "$domain" || return 1
+                SELECTED_TLS_CERT_PATH="${SB_CERT_DIR}/${domain}.crt"
+                SELECTED_TLS_KEY_PATH="${SB_CERT_DIR}/${domain}.key"
+            elif [[ -d "$HOME/.acme.sh/${domain}_ecc" || -d "$HOME/.acme.sh/${domain}" ]]; then
+                warn "检测到 acme.sh 目录但没有完整证书文件，已跳过复用"
+            fi
+            SELECTED_TLS_DOMAIN="$domain"
+            SELECTED_TLS_LINK_ADDR="$domain"
+            SELECTED_TLS_INSECURE="false"
+            info "复用证书: ${domain}"
+            ;;
+        2)
+            domain="${CONNECT_ADDR}"
+            pair=$(gen_self_cert "$domain")
+            SELECTED_TLS_DOMAIN="$domain"
+            SELECTED_TLS_CERT_PATH="${pair%%:*}"
+            SELECTED_TLS_KEY_PATH="${pair##*:}"
+            SELECTED_TLS_LINK_ADDR="$CONNECT_ADDR"
+            SELECTED_TLS_INSECURE="true"
+            ;;
+        3)
+            ask "域名:"; read -r domain
+            [[ -z "$domain" ]] && { err "域名不能为空"; return 1; }
+            acme_issue "$domain" || return 1
+            SELECTED_TLS_DOMAIN="$domain"
+            SELECTED_TLS_CERT_PATH="${SB_CERT_DIR}/${domain}.crt"
+            SELECTED_TLS_KEY_PATH="${SB_CERT_DIR}/${domain}.key"
+            SELECTED_TLS_LINK_ADDR="$domain"
+            SELECTED_TLS_INSECURE="false"
+            ;;
+        *)
+            err "证书模式选择无效"
+            return 1
+            ;;
+    esac
+}
+
 # ────── 公共参数收集:连接IP/域名 ──────
 ask_connect_addr() {
     # 支持环境变量 VOLSB_IP 跳过交互
@@ -704,27 +784,11 @@ deploy_hysteria2() {
     local port; ask "监听端口 (回车随机):"; read -r port
     [[ -z "$port" ]] && port=$(random_port)
 
-    local masq_domain cert_path key_path insecure="true"
-    echo "  TLS 证书:"
-    echo "   1) 自签证书 (客户端需开 insecure)"
-    echo "   2) Let's Encrypt 正式证书"
-    echo "   0) 返回上一级"
-    ask "选择 [0/1/2] 默认1:"; read -r cc
-    if [[ "$cc" == "0" ]] || is_back_choice "$cc"; then
-        info "已返回上一级"; return 1
-    fi
-    [[ -z "$cc" ]] && cc="1"
-    if [[ "$cc" == "2" ]]; then
-        ask "域名:"; read -r masq_domain; [[ -z "$masq_domain" ]] && die "域名不能为空"
-        acme_issue "$masq_domain" || return 1
-        cert_path="${SB_CERT_DIR}/${masq_domain}.crt"
-        key_path="${SB_CERT_DIR}/${masq_domain}.key"
-        insecure="false"
-    else
-        masq_domain="bing.com"
-        local pair; pair=$(gen_self_cert "$masq_domain")
-        cert_path="${pair%%:*}"; key_path="${pair##*:}"
-    fi
+    select_tls_cert_mode "TLS 证书" || return 1
+    local masq_domain="$SELECTED_TLS_DOMAIN"
+    local cert_path="$SELECTED_TLS_CERT_PATH"
+    local key_path="$SELECTED_TLS_KEY_PATH"
+    local insecure="$SELECTED_TLS_INSECURE"
 
     ask_multi_user_count; local user_count="$USER_COUNT"
     local users_json="["; local idx=0
@@ -814,27 +878,11 @@ INFO
 deploy_trojan() {
     step "配置 Trojan + TLS"
     local port; ask "监听端口 (回车默认443):"; read -r port; [[ -z "$port" ]] && port=443
-    local masq_domain cert_path key_path insecure="true"
-    echo "  TLS 证书:"
-    echo "   1) 自签"
-    echo "   2) Let's Encrypt"
-    echo "   0) 返回上一级"
-    ask "选择 [0/1/2] 默认1:"; read -r cc
-    if [[ "$cc" == "0" ]] || is_back_choice "$cc"; then
-        info "已返回上一级"; return 1
-    fi
-    [[ -z "$cc" ]] && cc="1"
-    if [[ "$cc" == "2" ]]; then
-        ask "域名:"; read -r masq_domain; [[ -z "$masq_domain" ]] && die "域名不能为空"
-        acme_issue "$masq_domain" || return 1
-        cert_path="${SB_CERT_DIR}/${masq_domain}.crt"
-        key_path="${SB_CERT_DIR}/${masq_domain}.key"
-        insecure="false"
-    else
-        masq_domain="bing.com"
-        local pair; pair=$(gen_self_cert "$masq_domain")
-        cert_path="${pair%%:*}"; key_path="${pair##*:}"
-    fi
+    select_tls_cert_mode "TLS 证书" || return 1
+    local masq_domain="$SELECTED_TLS_DOMAIN"
+    local cert_path="$SELECTED_TLS_CERT_PATH"
+    local key_path="$SELECTED_TLS_KEY_PATH"
+    local insecure="$SELECTED_TLS_INSECURE"
 
     ask_multi_user_count; local user_count="$USER_COUNT"
     local users_json="["; local idx=0
@@ -1655,39 +1703,17 @@ deploy_anytls() {
         local keypair; keypair=$("$SB_BIN" generate reality-keypair)
         reality_priv_key=$(echo "$keypair" | awk '/PrivateKey/{print $2}')
         reality_pub_key=$(echo  "$keypair" | awk '/PublicKey/{print $2}')
-    elif [[ "$cchoice" == "3" ]]; then
-        ask "域名:"; read -r masq_domain
-        [[ -z "$masq_domain" ]] && { err "域名不能为空"; return 1; }
-        acme_issue "$masq_domain" || return 1
-        cert_path="${SB_CERT_DIR}/${masq_domain}.crt"
-        key_path="${SB_CERT_DIR}/${masq_domain}.key"
-        insecure="false"
-        link_addr="$masq_domain"
-    elif [[ "$cchoice" == "2" ]]; then
-        masq_domain="${CONNECT_ADDR}"
-        local pair; pair=$(gen_self_cert "$masq_domain")
-        cert_path="${pair%%:*}"; key_path="${pair##*:}"
-        link_addr="$CONNECT_ADDR"
     else
-        select_existing_cert || return 1
-        masq_domain="$SELECTED_CERT_DOMAIN"
-        cert_path="$SELECTED_CERT_PATH"
-        key_path="$SELECTED_CERT_KEY_PATH"
-        if [[ -z "$masq_domain" || -z "$cert_path" || -z "$key_path" ]]; then
-            err "证书选择失败，请重新选择"
-            return 1
-        fi
-        if acme_has_domain "$masq_domain"; then
-            info "检测到 acme.sh 证书记录，重新安装 fullchain..."
-            acme_install_cert "$masq_domain" || return 1
-            cert_path="${SB_CERT_DIR}/${masq_domain}.crt"
-            key_path="${SB_CERT_DIR}/${masq_domain}.key"
-        elif [[ -d "$HOME/.acme.sh/${masq_domain}_ecc" || -d "$HOME/.acme.sh/${masq_domain}" ]]; then
-            warn "检测到 acme.sh 目录但没有完整证书文件，已跳过复用"
-        fi
-        insecure="false"
-        link_addr="$masq_domain"
-        info "复用证书: ${masq_domain}"
+        case "$cchoice" in
+            1|2|3) : ;;
+            *) err "TLS 模式选择无效"; return 1 ;;
+        esac
+        select_tls_cert_mode_from_choice "$cchoice" || return 1
+        masq_domain="$SELECTED_TLS_DOMAIN"
+        cert_path="$SELECTED_TLS_CERT_PATH"
+        key_path="$SELECTED_TLS_KEY_PATH"
+        insecure="$SELECTED_TLS_INSECURE"
+        link_addr="$SELECTED_TLS_LINK_ADDR"
     fi
     [[ -z "$link_addr" ]] && link_addr="$CONNECT_ADDR"
 

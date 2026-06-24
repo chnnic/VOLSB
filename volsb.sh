@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.4.23
+#   版本   : 1.4.24
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS
@@ -29,7 +29,7 @@ hr()      { echo -e "${C_DIM}$(printf '─%.0s' {1..60})${NC}"; }
 banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.4.23"
+VOLSB_VER="1.4.24"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -2155,7 +2155,7 @@ HDR
         while IFS='|' read -r port_type port port_tag port_listen; do
             [[ -n "$port" && "$port" != "0" ]] || continue
             [[ "$port_listen" == "127.0.0.1" ]] && continue
-            ports+=("${port}|${port_type}|${port_tag}|${port_listen}")
+            ports+=("${port_type}|${port}|${port_tag}|${port_listen}")
         done < <(jq -r '.inbounds[] | [(.type//"unknown"), (.listen_port//0|tostring), (.tag//""), (.listen//"")] | join("|")' "$SB_CONFIG" 2>/dev/null)
 
         if [[ ${#ports[@]} -eq 0 ]]; then
@@ -2192,6 +2192,202 @@ HDR
 
         err "端口选择无效"
         return 1
+    }
+
+    choose_relay_outbounds() {
+        local outbounds=() tag addr port method passw network item
+        while IFS='|' read -r tag addr port method passw network; do
+            [[ -n "$addr" && -n "$port" ]] || continue
+            outbounds+=("${tag}|${addr}|${port}|${method}|${passw}|${network}")
+        done < <(jq -r '.outbounds[] | select(.type=="shadowsocks") |
+            [(.tag//"ss-out"), (.server//""), (.server_port//0|tostring), (.method//""), (.password//""), (.network//"tcp")]
+            | join("|")' "$SB_CONFIG" 2>/dev/null)
+
+        if [[ ${#outbounds[@]} -eq 0 ]]; then
+            return 1
+        fi
+
+        echo ""
+        echo "  可检测出站:"
+        local i=1
+        for item in "${outbounds[@]}"; do
+            IFS='|' read -r tag addr port method passw network <<< "$item"
+            printf "   %d) %-12s %s:%s (%s)\n" "$i" "${tag:-ss-out}" "$addr" "$port" "$method"
+            (( i++ )) || true
+        done
+        [[ ${#outbounds[@]} -gt 1 ]] && echo "   0) 全部出站"
+
+        local choice default_choice
+        default_choice="1"
+        [[ ${#outbounds[@]} -gt 1 ]] && default_choice="0"
+        if [[ ${#outbounds[@]} -gt 1 ]]; then
+            ask "选择出站 [0-${#outbounds[@]}]，0全部，回车默认${default_choice}:"
+        else
+            ask "选择出站 [1-${#outbounds[@]}]，回车默认${default_choice}:"
+        fi
+        read -r choice
+        [[ -z "$choice" ]] && choice="$default_choice"
+
+        SELECTED_VERIFY_OUTBOUNDS=()
+        if [[ "$choice" == "0" && ${#outbounds[@]} -gt 1 ]]; then
+            SELECTED_VERIFY_OUTBOUNDS=("${outbounds[@]}")
+            return 0
+        fi
+
+        if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#outbounds[@]} )); then
+            SELECTED_VERIFY_OUTBOUNDS=("${outbounds[$(( choice - 1 ))]}")
+            return 0
+        fi
+
+        err "出站选择无效"
+        return 1
+    }
+
+    verify_one_ss_outbound() {
+        local item="$1"
+        local land_tag land_addr land_port land_method land_pass_test land_network
+        IFS='|' read -r land_tag land_addr land_port land_method land_pass_test land_network <<< "$item"
+        [[ -n "$land_tag" ]] || land_tag="ss-out"
+        [[ -n "$land_network" ]] || land_network="tcp"
+
+        echo ""
+        echo -e "  ${C_BOLD}出站 ${land_tag}:${NC} ${C_CYAN}${land_addr}:${land_port}${NC} (${land_method})"
+
+        echo -n "  TCP 连接 ... "
+        if timeout 5 bash -c "echo >/dev/tcp/${land_addr}/${land_port}" 2>/dev/null; then
+            echo -e "${C_GREEN}成功${NC}"; (( pass++ )) || true
+        else
+            echo -e "${C_RED}失败${NC}"
+            echo -e "  ${C_DIM}→ 请检查该出站防火墙/安全组是否放行 ${land_port} 端口${NC}"
+            (( fail++ )) || true
+        fi
+
+        if [[ -z "$land_pass_test" ]]; then
+            echo -e "  ${C_RED}[✗]${NC} 无法读取密码"; (( fail++ )) || true
+        else
+            local pass_len decoded_len expected_len=16
+            pass_len=${#land_pass_test}
+            decoded_len=$(echo "$land_pass_test" | base64 -d 2>/dev/null | wc -c | tr -d ' ') || decoded_len=0
+            [[ "$land_method" == *"256"* ]] && expected_len=32
+
+            echo -e "  加密方式 : ${C_CYAN}${land_method}${NC}"
+            echo -e "  密码长度 : ${pass_len} 字符"
+            if [[ "$land_method" == "2022-"* ]]; then
+                echo -e "  Base64解码: ${decoded_len} 字节 (期望 ${expected_len} 字节)"
+                if [[ $decoded_len -eq $expected_len ]]; then
+                    echo -e "  ${C_GREEN}[✓]${NC} 密码格式正确"
+                    (( pass++ )) || true
+                else
+                    echo -e "  ${C_RED}[✗]${NC} 密码格式错误，2022系列需要 base64(${expected_len}字节随机数)"
+                    (( fail++ )) || true
+                fi
+            else
+                echo -e "  ${C_GREEN}[✓]${NC} 非2022系列加密，密码格式无特殊要求"
+                (( pass++ )) || true
+            fi
+        fi
+
+        local land_ip="$land_addr"
+        if ! echo "$land_addr" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$|:'; then
+            echo -n "  解析域名 ${land_addr} ... "
+            local resolved=""
+            resolved=$(getent hosts "$land_addr" 2>/dev/null | awk '{print $1; exit}') || true
+            [[ -z "$resolved" ]] && \
+                resolved=$(nslookup "$land_addr" 2>/dev/null | awk '/^Address:/{print $2}' | grep -v '#' | head -1) || true
+            if [[ -n "$resolved" ]]; then
+                land_ip="$resolved"; echo -e "${C_GREEN}${land_ip}${NC}"
+            else
+                echo -e "${C_YELLOW}解析失败，使用域名继续${NC}"
+            fi
+        fi
+
+        local land_port_int
+        land_port_int=$(( land_port + 0 )) 2>/dev/null || land_port_int=0
+        if [[ $land_port_int -eq 0 ]]; then
+            echo -e "  ${C_RED}[✗]${NC} 出站端口无效: ${land_port}"
+            (( fail++ )) || true
+            return 0
+        fi
+
+        local test_port=19876
+        while ss -tuln 2>/dev/null | grep -q ":${test_port} "; do
+            (( test_port++ )) || true
+        done
+
+        local test_cfg test_log
+        test_cfg=$(mktemp /tmp/volsb_test_XXXX.json)
+        local safe_tag="${land_tag//[^A-Za-z0-9_.-]/_}"
+        test_log="/tmp/volsb_test_${safe_tag}_$$.log"; : > "$test_log"
+
+        jq -n \
+            --arg log "$test_log" \
+            --arg server "$land_ip" \
+            --arg method "$land_method" \
+            --arg password "$land_pass_test" \
+            --argjson listen_port "$test_port" \
+            --argjson server_port "$land_port_int" \
+            '{
+              log: {level:"debug", output:$log},
+              inbounds: [{type:"socks", tag:"test-in", listen:"127.0.0.1", listen_port:$listen_port}],
+              outbounds: [
+                {type:"shadowsocks", tag:"ss-out", server:$server, server_port:$server_port, method:$method, password:$password, network:"tcp"},
+                {type:"direct", tag:"direct"}
+              ],
+              route: {rules:[{inbound:["test-in"], outbound:"ss-out"}], final:"direct"}
+            }' > "$test_cfg"
+
+        if ! "$SB_BIN" check -c "$test_cfg" 2>/dev/null; then
+            echo -e "  ${C_RED}[✗]${NC} 临时配置校验失败:"
+            "$SB_BIN" check -c "$test_cfg" 2>&1 | grep -v '^$' | head -5 | sed 's/^/       /'
+            rm -f "$test_cfg" "$test_log"
+            (( fail++ )) || true
+            return 0
+        fi
+
+        echo "  启动临时测试实例 (socks5://127.0.0.1:${test_port}) ..."
+        "$SB_BIN" run -c "$test_cfg" >> "$test_log" 2>&1 &
+        local test_pid=$!
+
+        local waited=0
+        while ! ss -tuln 2>/dev/null | grep -q ":${test_port} " && [[ $waited -lt 8 ]]; do
+            sleep 1; (( waited++ )) || true
+        done
+
+        if ! ss -tuln 2>/dev/null | grep -q ":${test_port} "; then
+            echo -e "  ${C_RED}[✗]${NC} 临时实例启动失败，错误日志:"
+            cat "$test_log" 2>/dev/null | grep -iE "error|fatal" | head -5 | sed 's/^/       /'
+            (( fail++ )) || true
+        else
+            local local_ip="" relay_ip=""
+            local_ip=$(curl -fsSL --max-time 6 "https://api.ipify.org" 2>/dev/null | tr -d '[:space:]') || true
+            relay_ip=$(curl -fsSL --max-time 30 \
+                --socks5-hostname "127.0.0.1:${test_port}" \
+                "https://api.ipify.org" 2>/dev/null | tr -d '[:space:]') || true
+
+            if [[ -n "$relay_ip" && "$relay_ip" != "$local_ip" ]]; then
+                echo -e "  ${C_GREEN}[✓]${NC} 转发成功"
+                echo -e "       本机 IP : ${C_DIM}${local_ip:-未知}${NC}"
+                echo -e "       出口 IP : ${C_GREEN}${relay_ip}${NC}  ← ${land_tag}"
+                (( pass++ )) || true
+            elif [[ -n "$relay_ip" && "$relay_ip" == "$local_ip" ]]; then
+                echo -e "  ${C_YELLOW}[!]${NC} 出口 IP 与本机相同，流量可能未经过 ${land_tag}"
+                (( fail++ )) || true
+            else
+                if grep -q "outbound connection" "$test_log" 2>/dev/null; then
+                    echo -e "  ${C_YELLOW}[!]${NC} SS 出站已连通，但响应超时"
+                    echo -e "       ${C_DIM}→ 连接已建立：线路机 → ${land_tag} → 目标${NC}"
+                    (( pass++ )) || true
+                else
+                    echo -e "  ${C_RED}[✗]${NC} SS 出站连接失败，诊断日志:"
+                    grep -iE "error|failed|refused|timeout|reset" "$test_log" 2>/dev/null \
+                        | tail -5 | sed 's/^/       /'
+                    (( fail++ )) || true
+                fi
+            fi
+        fi
+
+        kill $test_pid 2>/dev/null; wait $test_pid 2>/dev/null
+        rm -f "$test_cfg" "$test_log"
     }
 
     # ── Step 0: 时间偏差预检 ──
@@ -2240,21 +2436,20 @@ HDR
         return
     fi
 
-    # 检查是否是线路机配置（有 ss 出站）
-    local land_addr land_port land_method
-    land_addr=$(jq  -r '.outbounds[] | select(.type=="shadowsocks") | .server // ""' "$SB_CONFIG" 2>/dev/null | head -1)
-    land_port=$(jq  -r '.outbounds[] | select(.type=="shadowsocks") | .server_port // ""' "$SB_CONFIG" 2>/dev/null | head -1)
-    land_method=$(jq -r '.outbounds[] | select(.type=="shadowsocks") | .method // ""' "$SB_CONFIG" 2>/dev/null | head -1)
+    # 检查是否是线路机/分流配置（有 ss 出站）
+    local ss_count
+    ss_count=$(jq '[.outbounds[]? | select(.type=="shadowsocks")] | length' "$SB_CONFIG" 2>/dev/null | tr -d '[:space:]') || ss_count=0
+    ss_count=$(( ss_count + 0 )) 2>/dev/null || ss_count=0
     local in_port
     in_port=$(jq -r '.inbounds[] | select((.listen_port // 0) > 0) | .listen_port // ""' "$SB_CONFIG" 2>/dev/null | head -1)
 
-    if [[ -z "$land_addr" || -z "$land_port" ]]; then
+    if [[ $ss_count -eq 0 ]]; then
         echo -e "  ${C_YELLOW}[!]${NC} 当前不是线路机配置（无 Shadowsocks 出站）"
-        echo    "      请先以线路机模式安装: 菜单 1 → 选择模式 2"
+        echo    "      请先以线路机模式安装，或使用带 SS 分流出口的部署机配置"
         return
     fi
 
-    echo -e "  ${C_GREEN}[✓]${NC} 线路机配置已找到"
+    echo -e "  ${C_GREEN}[✓]${NC} 配置已找到"
     if choose_relay_inbound_port; then
         echo -e "       入站端口  : ${C_CYAN}${SELECTED_VERIFY_PORT}${NC}"
         [[ -n "${SELECTED_VERIFY_TYPE:-}" ]] && echo -e "       入站类型  : ${C_CYAN}${SELECTED_VERIFY_TYPE}${NC}"
@@ -2264,7 +2459,13 @@ HDR
         SELECTED_VERIFY_PORT="$in_port"
         echo -e "       入站端口  : ${C_CYAN}${SELECTED_VERIFY_PORT}${NC}"
     fi
-    echo -e "       落地机    : ${C_CYAN}${land_addr}:${land_port}${NC} (${land_method})"
+
+    if choose_relay_outbounds; then
+        echo -e "       检测出站  : ${C_CYAN}${#SELECTED_VERIFY_OUTBOUNDS[@]} 个${NC}"
+    else
+        echo -e "  ${C_RED}[✗]${NC} 未读取到可检测的 Shadowsocks 出站"
+        return
+    fi
 
     # ── Step 3: 端口监听检查 ──
     hr; echo -e "  ${C_BOLD}Step 3 — 端口监听${NC}"; hr
@@ -2275,172 +2476,16 @@ HDR
         (( fail++ )) || true
     fi
 
-    # ── Step 4: 落地机 TCP 连通性 ──
-    hr; echo -e "  ${C_BOLD}Step 4 — 落地机 TCP 连通性${NC}"; hr
-    echo -n "  测试 TCP 连接到 ${land_addr}:${land_port} ... "
-    if timeout 5 bash -c "echo >/dev/tcp/${land_addr}/${land_port}" 2>/dev/null; then
-        echo -e "${C_GREEN}成功${NC}"; (( pass++ )) || true
-    else
-        echo -e "${C_RED}失败${NC}"
-        (( fail++ )) || true
-        echo -e "  ${C_DIM}→ 落地机不可达，请检查: 落地机防火墙/安全组是否放行 ${land_port} 端口${NC}"
-    fi
-
-    # ── Step 4.5: 密码格式验证 ──
-    hr; echo -e "  ${C_BOLD}Step 4.5 — SS 密码格式验证${NC}"; hr
-
-    local land_pass_chk
-    land_pass_chk=$(jq -r '.outbounds[] | select(.type=="shadowsocks") | .password // ""'         "$SB_CONFIG" 2>/dev/null | head -1)
-
-    if [[ -z "$land_pass_chk" ]]; then
-        echo -e "  ${C_RED}[✗]${NC} 无法读取密码"; (( fail++ )) || true
-    else
-        # 2022-blake3-* 系列要求密码是 base64 编码的固定字节数
-        # aes-128-gcm → 16字节 → base64 = 24字符（含==填充）
-        # aes-256-gcm → 32字节 → base64 = 44字符
-        local pass_len decoded_len method_chk
-        method_chk=$(jq -r '.outbounds[] | select(.type=="shadowsocks") | .method // ""'             "$SB_CONFIG" 2>/dev/null | head -1)
-        pass_len=${#land_pass_chk}
-        decoded_len=$(echo "$land_pass_chk" | base64 -d 2>/dev/null | wc -c | tr -d ' ') || decoded_len=0
-
-        local expected_len=16
-        [[ "$method_chk" == *"256"* ]] && expected_len=32
-
-        echo -e "  加密方式 : ${C_CYAN}${method_chk}${NC}"
-        echo -e "  密码长度 : ${pass_len} 字符"
-        echo -e "  Base64解码: ${decoded_len} 字节 (期望 ${expected_len} 字节)"
-
-        if [[ "$method_chk" == "2022-"* ]]; then
-            if [[ $decoded_len -eq $expected_len ]]; then
-                echo -e "  ${C_GREEN}[✓]${NC} 密码格式正确 (base64/${expected_len}字节)"
-                (( pass++ )) || true
-            else
-                echo -e "  ${C_RED}[✗]${NC} 密码格式错误！2022系列加密要求 base64(${expected_len}字节随机数)"
-                echo    "       当前密码解码后为 ${decoded_len} 字节，不符合要求"
-                echo    "       正确格式示例: $(openssl rand -base64 $expected_len | tr -d '\n')"
-                echo    "       请确认落地机密码格式是否一致"
-                (( fail++ )) || true
-            fi
-        else
-            echo -e "  ${C_GREEN}[✓]${NC} 非2022系列加密，密码格式无特殊要求"
-            (( pass++ )) || true
-        fi
-    fi
-
-    # ── Step 5: 落地机出口IP验证 ──
-    hr; echo -e "  ${C_BOLD}Step 5 — 出口 IP 验证${NC}"; hr
-    echo    "  通过临时 SS 出站查询真实出口 IP..."
-
-    # 若 land_addr 是域名先解析成 IP，sing-box 临时实例不带 DNS
-    local land_ip="$land_addr"
-    if ! echo "$land_addr" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
-        echo -n "  解析域名 ${land_addr} ... "
-        local resolved=""
-        resolved=$(getent hosts "$land_addr" 2>/dev/null | awk '{print $1; exit}') || true
-        [[ -z "$resolved" ]] && \
-            resolved=$(nslookup "$land_addr" 2>/dev/null | awk '/^Address:/{print $2}' | grep -v '#' | head -1) || true
-        if [[ -n "$resolved" ]]; then
-            land_ip="$resolved"; echo -e "${C_GREEN}${land_ip}${NC}"
-        else
-            echo -e "${C_YELLOW}解析失败，使用域名继续${NC}"
-        fi
-    fi
-
-    # 从 config 读取落地机密码
-    local land_pass_test land_port_int
-    land_pass_test=$(jq -r '.outbounds[] | select(.type=="shadowsocks") | .password // ""' \
-        "$SB_CONFIG" 2>/dev/null | head -1)
-    land_port_int=$(jq -r '.outbounds[] | select(.type=="shadowsocks") | .server_port // 0' \
-        "$SB_CONFIG" 2>/dev/null | head -1 | tr -d '[:space:]')
-    land_port_int=$(( land_port_int + 0 )) 2>/dev/null || land_port_int=0
-
-    # 找空闲端口
-    local test_port=19876
-    while ss -tuln 2>/dev/null | grep -q ":${test_port} "; do
-        (( test_port++ )) || true
+    # ── Step 4: 出站链路验证 ──
+    hr; echo -e "  ${C_BOLD}Step 4 — 出站链路验证${NC}"; hr
+    echo    "  逐个检测所选 Shadowsocks 出站的 TCP、密码格式和出口 IP..."
+    local outbound_item
+    for outbound_item in "${SELECTED_VERIFY_OUTBOUNDS[@]}"; do
+        verify_one_ss_outbound "$outbound_item"
     done
 
-    # 生成临时配置（server 用 IP，port 用整数，无 dns 块）
-    local test_cfg test_log
-    test_cfg=$(mktemp /tmp/volsb_test_XXXX.json)
-    test_log="/tmp/volsb_test_$$.log"; : > "$test_log"
-
-    cat > "$test_cfg" << TESTCFG
-{
-  "log": {"level": "debug", "output": "${test_log}"},
-  "inbounds": [{"type": "socks", "tag": "test-in", "listen": "127.0.0.1", "listen_port": ${test_port}}],
-  "outbounds": [
-    {"type": "shadowsocks", "tag": "ss-out",
-     "server": "${land_ip}", "server_port": ${land_port_int},
-     "method": "${land_method}", "password": "${land_pass_test}", "network": "tcp"},
-    {"type": "direct", "tag": "direct"}
-  ],
-  "route": {"rules": [{"inbound": ["test-in"], "outbound": "ss-out"}], "final": "direct"}
-}
-TESTCFG
-
-    # 先校验配置，失败时输出具体原因
-    if ! "$SB_BIN" check -c "$test_cfg" 2>/dev/null; then
-        echo -e "  ${C_RED}[✗]${NC} 临时配置校验失败:"
-        "$SB_BIN" check -c "$test_cfg" 2>&1 | grep -v '^$' | head -5 | sed 's/^/       /'
-        rm -f "$test_cfg" "$test_log"
-        (( fail++ )) || true
-    else
-        echo "  启动临时测试实例 (socks5://127.0.0.1:${test_port}) ..."
-        "$SB_BIN" run -c "$test_cfg" >> "$test_log" 2>&1 &
-        local test_pid=$!
-
-        local waited=0
-        while ! ss -tuln 2>/dev/null | grep -q ":${test_port} " && [[ $waited -lt 8 ]]; do
-            sleep 1; (( waited++ )) || true
-        done
-
-        if ! ss -tuln 2>/dev/null | grep -q ":${test_port} "; then
-            echo -e "  ${C_RED}[✗]${NC} 临时实例启动失败，错误日志:"
-            cat "$test_log" 2>/dev/null | grep -iE "error|fatal" | head -5 | sed 's/^/       /'
-            (( fail++ )) || true
-        else
-            local local_ip="" relay_ip=""
-            local_ip=$(curl -fsSL --max-time 6 "https://api.ipify.org" 2>/dev/null | tr -d '[:space:]') || true
-            relay_ip=$(curl -fsSL --max-time 30 \
-                --socks5-hostname "127.0.0.1:${test_port}" \
-                "https://api.ipify.org" 2>/dev/null | tr -d '[:space:]') || true
-
-            if [[ -n "$relay_ip" && "$relay_ip" != "$local_ip" ]]; then
-                echo -e "  ${C_GREEN}[✓]${NC} 转发成功！"
-                echo -e "       本机 IP : ${C_DIM}${local_ip:-未知}${NC}"
-                echo -e "       出口 IP : ${C_GREEN}${relay_ip}${NC}  ← 落地机出口"
-                (( pass++ )) || true
-            elif [[ -n "$relay_ip" && "$relay_ip" == "$local_ip" ]]; then
-                echo -e "  ${C_YELLOW}[!]${NC} 出口 IP 与本机相同，流量未经落地机"
-                (( fail++ )) || true
-            else
-                # outbound connection 出现 = SS 连通了，只是回包超时
-                if grep -q "outbound connection" "$test_log" 2>/dev/null; then
-                    echo -e "  ${C_YELLOW}[!]${NC} SS 出站已连通，但响应超时（落地机回程延迟过高）"
-                    echo -e "       ${C_DIM}→ 连接已建立：线路机 → 落地机 → 目标 均正常${NC}"
-                    echo    "       → 建议检查落地机出口带宽或更换延迟更低的落地机"
-                    echo    "       → 实际节点大概率可以使用，只是验证工具超时"
-                    (( pass++ )) || true
-                else
-                    echo -e "  ${C_RED}[✗]${NC} SS 出站连接失败，诊断日志:"
-                    grep -iE "error|failed|refused|timeout|reset" "$test_log" 2>/dev/null                         | tail -5 | sed 's/^/       /'
-                    echo ""
-                    echo    "       检查项目:"
-                    echo    "       ① 落地机 SS 密码/加密是否一致 (当前: ${land_method})"
-                    echo    "       ② 落地机 SS 服务是否运行"
-                    echo    "       ③ 落地机防火墙是否放行 ${land_port} 端口 TCP"
-                    (( fail++ )) || true
-                fi
-            fi
-        fi
-
-        kill $test_pid 2>/dev/null; wait $test_pid 2>/dev/null
-        rm -f "$test_cfg" "$test_log"
-    fi
-
-    # ── Step 6: 日志检查 ──
-    hr; echo -e "  ${C_BOLD}Step 6 — 最近错误日志${NC}"; hr
+    # ── Step 5: 日志检查 ──
+    hr; echo -e "  ${C_BOLD}Step 5 — 最近错误日志${NC}"; hr
     local err_lines
     err_lines=$(journalctl -u sing-box --since "5 minutes ago" --no-pager 2>/dev/null         | grep -iE "error|failed|refused|timeout" | tail -5)
     if [[ -z "$err_lines" ]]; then
@@ -2459,9 +2504,9 @@ TESTCFG
     else
         echo ""
         echo -e "  ${C_YELLOW}排查建议:${NC}"
-        echo    "   1. 确认落地机防火墙已放行 ${land_port} 端口（TCP）"
-        echo    "   2. 确认落地机 sing-box/ss 服务正在运行"
-        echo    "   3. 检查密码和加密方式是否与落地机一致"
+        echo    "   1. 确认失败的 SS 出站端口已在对应落地机防火墙/安全组放行"
+        echo    "   2. 确认对应落地机 sing-box/SS 服务正在运行"
+        echo    "   3. 检查失败出站的密码和加密方式是否与落地机一致"
         echo    "   4. 查看完整日志: volsb log"
     fi
     echo ""

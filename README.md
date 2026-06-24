@@ -11,7 +11,7 @@
     ╚═══╝   ╚═════╝ ╚══════╝╚══════╝╚═════╝
 ```
 
-[![Version](https://img.shields.io/badge/version-1.4.23-blue.svg)](https://github.com/chnnic/VOLSB)
+[![Version](https://img.shields.io/badge/version-1.4.24-blue.svg)](https://github.com/chnnic/VOLSB)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![sing-box](https://img.shields.io/badge/sing--box-1.13.13-orange.svg)](https://github.com/SagerNet/sing-box)
 
@@ -53,7 +53,7 @@ VOLSB 是一个功能完整的 **sing-box 服务端** 一键部署脚本，支�
 | 一键部署 | VLESS+Reality 入站 → Shadowsocks 出站 → 落地机 |
 | SS 链接解析 | 支持直接粘贴 `ss://` 链接自动解析落地机信息 |
 | 手动输入 | 支持手动填写落地机 IP、端口、密码、加密方式 |
-| 连通性验证 | 六步自动验证转发链路，支持选择不同入站端口逐个检测 |
+| 连通性验证 | 自动验证转发链路，支持选择不同入站端口和多个 SS 出站逐个检测 |
 | 一键安装命令 | 生成可直接在其他 VPS 运行的线路机安装命令 |
 
 ### ⚙️ 系统管理
@@ -113,7 +113,7 @@ volsb uninstall      # 完全卸载
 ```
   ██╗   ██╗ ██████╗ ██╗     ███████╗██████╗
   ...
-  v1.4.23  |  2026-06-24 04:35:00
+  v1.4.24  |  2026-06-24 04:35:00
 
   状态: ● 运行中
   版本: 1.13.13

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.4.29
+#   版本   : 1.4.30
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS
@@ -30,7 +30,7 @@ banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 is_back_choice() { [[ "${1:-}" =~ ^([bBqQ]|back|BACK|返回)$ ]]; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.4.29"
+VOLSB_VER="1.4.30"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -2767,6 +2767,9 @@ format_nodes_info() {
         function is_block_header(line) {
             return line ~ /^  \[/
         }
+        function print_separator() {
+            print "============================================================"
+        }
         function print_node() {
             if (node_block == "") return
             print node_block
@@ -2774,6 +2777,7 @@ format_nodes_info() {
                 print ""
                 print route_block
             }
+            print_separator()
             node_block = ""
             route_block = ""
         }

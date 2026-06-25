@@ -3111,14 +3111,17 @@ HDR
     fi
 
     # ── 展示所有分享链接（带编号和二维码）──
-    if [[ -f "$SB_LINKS" ]] && [[ -s "$SB_LINKS" ]]; then
+    local links=() link
+    while IFS= read -r link; do
+        [[ -n "$link" ]] && links+=("$link")
+    done < <(collect_share_links)
+    if [[ ${#links[@]} -gt 0 ]]; then
         hr
         echo -e "
   ${C_BOLD}分享链接:${NC}
 "
         local i=0
-        while IFS= read -r link; do
-            [[ -z "$link" ]] && continue
+        for link in "${links[@]}"; do
             (( i++ )) || true
             # 从链接提取协议和名称
             local proto name
@@ -3128,7 +3131,7 @@ HDR
             echo -e "  ${C_DIM}${link}${NC}"
             echo ""
             print_qr "$link"
-        done < "$SB_LINKS"
+        done
         echo -e "  共 ${C_BOLD}${i}${NC} 条链接，已保存: ${C_DIM}$SB_LINKS${NC}"
     else
         echo ""
@@ -3145,6 +3148,23 @@ count_active_inbounds() {
 count_saved_links() {
     [[ -f "$SB_LINKS" ]] || { echo 0; return 0; }
     awk 'NF{n++} END{print n+0}' "$SB_LINKS" 2>/dev/null || echo 0
+}
+
+collect_share_links() {
+    local links=() link
+    if [[ -f "$SB_LINKS" && -s "$SB_LINKS" ]]; then
+        while IFS= read -r link; do
+            [[ -n "$link" ]] && links+=("$link")
+        done < "$SB_LINKS"
+    fi
+
+    if [[ ${#links[@]} -le 0 && -f "$SB_INFO" ]]; then
+        while IFS= read -r link; do
+            [[ -n "$link" ]] && links+=("$link")
+        done < <(grep -oP '(?<=链接\s*:\s*)(?:vmess|[a-z0-9+.-]+)://.*$' "$SB_INFO" 2>/dev/null || true)
+    fi
+
+    printf '%s\n' "${links[@]}"
 }
 
 _clean_info_blocks_by_port() {
@@ -3561,12 +3581,11 @@ delete_node() {
 
 share_node_link() {
     require_root
-    [[ -f "$SB_LINKS" ]] || { warn "未找到分享链接文件"; return; }
 
     local links=() link
     while IFS= read -r link; do
         [[ -n "$link" ]] && links+=("$link")
-    done < "$SB_LINKS"
+    done < <(collect_share_links)
     if [[ ${#links[@]} -le 0 ]]; then
         warn "没有可分享的节点"
         return 0

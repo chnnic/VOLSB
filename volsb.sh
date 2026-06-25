@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.4.36
+#   版本   : 1.4.38
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS / SS / TUIC
@@ -30,7 +30,7 @@ banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 is_back_choice() { [[ "${1:-}" =~ ^([bBqQ]|back|BACK|返回)$ ]]; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.4.36"
+VOLSB_VER="1.4.38"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 SING_BOX_VER="1.13.13"
 
@@ -52,6 +52,8 @@ SB_LINKS="${SB_CONF_DIR}/links.txt"          # 所有分享链接
 SB_TRAFFIC="${SB_CONF_DIR}/traffic.json"     # 流量统计缓存
 SB_ENV="${SB_CONF_DIR}/volsb.env"            # 持久化运行参数
 VOLSB_CMD="/usr/local/bin/volsb"             # 快捷命令路径
+VOLSB_PORT_RESERVE_FILE="${TMPDIR:-/tmp}/volsb_ports.$$"
+trap 'rm -f "$VOLSB_PORT_RESERVE_FILE" 2>/dev/null || true' EXIT
 # Systemd / OpenRC service
 SB_SYSTEMD="/etc/systemd/system/sing-box.service"
 SB_OPENRC="/etc/init.d/sing-box"
@@ -283,11 +285,27 @@ url_encode() {
     printf '%s' "$s" | sed -e 's/%/%25/g' -e 's/ /%20/g' -e 's/:/%3A/g' -e 's/+/%2B/g' -e 's/\//%2F/g' -e 's/=/%3D/g'
 }
 
+port_is_reserved() {
+    local port="$1"
+    [[ -f "$VOLSB_PORT_RESERVE_FILE" ]] && grep -qx "$port" "$VOLSB_PORT_RESERVE_FILE" 2>/dev/null
+}
+
+reserve_port() {
+    local port="$1"
+    [[ "$port" =~ ^[0-9]+$ ]] || return 0
+    port_is_reserved "$port" && return 0
+    printf '%s\n' "$port" >> "$VOLSB_PORT_RESERVE_FILE"
+}
+
 random_port() {
     local p
     while :; do
         p=$(( RANDOM % 45000 + 10000 ))
-        ss -tuln 2>/dev/null | grep -q ":${p} " || { echo "$p"; return; }
+        ss -tuln 2>/dev/null | grep -q ":${p} " && continue
+        port_is_reserved "$p" && continue
+        reserve_port "$p"
+        echo "$p"
+        return
     done
 }
 
@@ -337,6 +355,17 @@ print_qr() {
     command -v qrencode &>/dev/null || return
     echo -e "\n${C_DIM}  扫码导入:${NC}"
     echo "$1" | qrencode -t ANSIUTF8 2>/dev/null || true
+}
+
+share_link_proto() {
+    local link="$1"
+    echo "${link%%://*}" | tr '[:lower:]' '[:upper:]'
+}
+
+share_link_name() {
+    local link="$1" fallback="$2" name
+    name=$(printf '%s' "$link" | grep -oP '(?<=#)[^#]*$' 2>/dev/null || true)
+    [[ -n "$name" ]] && printf '%s' "$name" || printf '%s' "$fallback"
 }
 
 save_env() { declare -p "$1" >> "$SB_ENV" 2>/dev/null || true; }
@@ -765,6 +794,7 @@ deploy_vless_reality() {
         ask "监听端口 (回车随机):"; read -r port
         [[ -z "$port" ]] && port=$(random_port)
     fi
+    reserve_port "$port"
 
     if [[ -n "${VOLSB_SNI:-}" ]]; then
         sni="$VOLSB_SNI"; info "SNI (环境变量): $sni"
@@ -841,6 +871,7 @@ deploy_hysteria2() {
 
     local port; ask "监听端口 (回车随机):"; read -r port
     [[ -z "$port" ]] && port=$(random_port)
+    reserve_port "$port"
 
     select_tls_cert_mode "TLS 证书" || return 1
     local masq_domain="$SELECTED_TLS_DOMAIN"
@@ -893,6 +924,7 @@ deploy_shadowsocks() {
 
     local base_port; ask "监听端口 (回车随机):"; read -r base_port
     [[ -z "$base_port" ]] && base_port=$(random_port)
+    reserve_port "$base_port"
 
     ask_multi_user_count; local user_count="$USER_COUNT"
     if [[ "$user_count" -gt 1 ]]; then
@@ -966,6 +998,7 @@ deploy_vmess_ws() {
     step "配置 VMess + WebSocket"
     local port ws_path
     ask "监听端口 (回车随机, 建议80):"; read -r port; [[ -z "$port" ]] && port=$(random_port)
+    reserve_port "$port"
     ask "WebSocket 路径 (回车随机):"; read -r ws_path
     [[ -z "$ws_path" ]] && ws_path="/$(gen_rand_hex 6)"
     [[ "${ws_path:0:1}" != "/" ]] && ws_path="/${ws_path}"
@@ -1010,6 +1043,7 @@ INFO
 deploy_trojan() {
     step "配置 Trojan + TLS"
     local port; ask "监听端口 (回车默认443):"; read -r port; [[ -z "$port" ]] && port=443
+    reserve_port "$port"
     select_tls_cert_mode "TLS 证书" || return 1
     local masq_domain="$SELECTED_TLS_DOMAIN"
     local cert_path="$SELECTED_TLS_CERT_PATH"
@@ -1060,6 +1094,7 @@ deploy_tuic() {
 
     local port; ask "监听端口 (回车随机):"; read -r port
     [[ -z "$port" ]] && port=$(random_port)
+    reserve_port "$port"
 
     select_tls_cert_mode "TLS 证书" || return 1
     local masq_domain="$SELECTED_TLS_DOMAIN"
@@ -1116,10 +1151,12 @@ deploy_shadowtls() {
     local stls_port sni
     ask "ShadowTLS 监听端口 (回车随机):"; read -r stls_port
     [[ -z "$stls_port" ]] && stls_port=$(random_port)
+    reserve_port "$stls_port"
     echo "  推荐 SNI: www.bing.com / www.apple.com / gateway.icloud.com"
     ask "伪装 SNI [默认 www.bing.com]:"; read -r sni; [[ -z "$sni" ]] && sni="www.bing.com"
 
     local ss_port; ss_port=$(random_port)
+    reserve_port "$ss_port"
     ask_multi_user_count; local user_count="$USER_COUNT"
     local stls_users="["; local ss_users="["; local idx=0
 
@@ -1738,6 +1775,7 @@ INFOHEADER
 
     local in_port sni
     ask "入站端口 (回车随机):"; read -r in_port; [[ -z "$in_port" ]] && in_port=$(random_port)
+    reserve_port "$in_port"
     echo "  SNI 推荐: www.cloudflare.com / www.microsoft.com"
     ask "伪装 SNI [默认 www.cloudflare.com]:"; read -r sni; [[ -z "$sni" ]] && sni="www.cloudflare.com"
 
@@ -1869,6 +1907,7 @@ deploy_anytls() {
         ask "监听端口 (回车随机):"; read -r port
         [[ -z "$port" ]] && port=$(random_port)
     fi
+    reserve_port "$port"
 
     echo "  TLS 模式:"
     echo "   1) 复用已有证书"
@@ -3131,13 +3170,23 @@ _clean_info_blocks_by_port() {
         function flush_block(    keep) {
             if (block == "") return
             keep = 1
-            if (block_has_port()) keep = 0
+            if (block_type == "node") {
+                if (block_has_port()) {
+                    keep = 0
+                    drop_following_route = 1
+                } else {
+                    drop_following_route = 0
+                }
+            } else if (drop_following_route) {
+                keep = 0
+            }
             if (keep) printf "%s", block
             block = ""
         }
         /^  \[/ {
             flush_block()
             block = $0 ORS
+            block_type = ($0 ~ /^  \[(出口系统|分流系统)\]/) ? "route" : "node"
             next
         }
         {
@@ -3147,6 +3196,263 @@ _clean_info_blocks_by_port() {
             flush_block()
         }
     ' "$SB_INFO" > "$tmp" && mv "$tmp" "$SB_INFO" || { rm -f "$tmp"; return 1; }
+}
+
+_clean_links_by_port() {
+    local ports_json="$1" tmp line port ports=()
+    [[ -f "$SB_LINKS" ]] || return 0
+    while IFS= read -r port; do
+        [[ -n "$port" ]] && ports+=("$port")
+    done < <(jq -r '.[]?' <<< "$ports_json" 2>/dev/null)
+    [[ ${#ports[@]} -gt 0 ]] || return 0
+    tmp=$(mktemp)
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        port=$(_share_link_port "$line")
+        if [[ -n "$port" ]] && _tag_exists_in_list "$port" "${ports[@]}"; then
+            continue
+        fi
+        printf '%s\n' "$line"
+    done < "$SB_LINKS" > "$tmp" || true
+    mv "$tmp" "$SB_LINKS"
+}
+
+_b64_decode() {
+    local data="$1"
+    while (( ${#data} % 4 )); do data="${data}="; done
+    printf '%s' "$data" | base64 -d 2>/dev/null && return 0
+    printf '%s' "$data" | base64 -D 2>/dev/null
+}
+
+_b64_encode() {
+    local data="$1"
+    printf '%s' "$data" | base64 -w0 2>/dev/null || printf '%s' "$data" | base64 | tr -d '\n'
+}
+
+_share_link_port() {
+    local link="$1" scheme body json hostinfo port
+    [[ "$link" == *"://"* ]] || return 0
+    scheme="${link%%://*}"
+    case "$scheme" in
+        vmess)
+            body="${link#vmess://}"
+            body="${body%%#*}"
+            json=$(_b64_decode "$body" 2>/dev/null) || return 0
+            printf '%s' "$json" | jq -r '.port // empty' 2>/dev/null
+            ;;
+        *)
+            body="${link#*://}"
+            body="${body%%#*}"
+            body="${body%%\?*}"
+            body="${body%%/*}"
+            [[ "$body" == *"@"* ]] || return 0
+            hostinfo="${body##*@}"
+            if [[ "$hostinfo" == \[*\]:* ]]; then
+                port="${hostinfo##*]:}"
+            elif [[ "$hostinfo" == *:* ]]; then
+                port="${hostinfo##*:}"
+            else
+                return 0
+            fi
+            [[ "$port" =~ ^[0-9]+$ ]] && printf '%s\n' "$port"
+            ;;
+    esac
+}
+
+_rewrite_share_link_port() {
+    local link="$1" old_port="$2" new_port="$3"
+    local scheme body frag="" query="" path="" userinfo hostinfo host json b64
+    [[ "$link" == *"://"* ]] || { printf '%s\n' "$link"; return; }
+    scheme="${link%%://*}"
+    case "$scheme" in
+        vmess)
+            body="${link#vmess://}"
+            frag=""
+            if [[ "$body" == *#* ]]; then
+                frag="#${body#*#}"
+                body="${body%%#*}"
+            fi
+            json=$(_b64_decode "$body" 2>/dev/null) || { printf '%s\n' "$link"; return; }
+            json=$(printf '%s' "$json" | jq -c --arg old "$old_port" --arg new "$new_port" '
+                .port = $new
+                | if (.ps? | type) == "string" then .ps |= gsub($old; $new) else . end
+            ' 2>/dev/null) || { printf '%s\n' "$link"; return; }
+            b64=$(_b64_encode "$json")
+            printf 'vmess://%s%s\n' "$b64" "$frag"
+            ;;
+        *)
+            body="${link#*://}"
+            if [[ "$body" == *#* ]]; then
+                frag="#${body#*#}"
+                frag="${frag//$old_port/$new_port}"
+                body="${body%%#*}"
+            fi
+            if [[ "$body" == *\?* ]]; then
+                query="?${body#*\?}"
+                body="${body%%\?*}"
+            fi
+            if [[ "$body" == */* ]]; then
+                path="/${body#*/}"
+                body="${body%%/*}"
+            fi
+            [[ "$body" == *"@"* ]] || { printf '%s\n' "$link"; return; }
+            userinfo="${body%@*}"
+            hostinfo="${body##*@}"
+            host="${hostinfo%:*}"
+            [[ -n "$host" && "$host" != "$hostinfo" ]] || { printf '%s\n' "$link"; return; }
+            printf '%s://%s@%s:%s%s%s%s\n' "$scheme" "$userinfo" "$host" "$new_port" "$path" "$query" "$frag"
+            ;;
+    esac
+}
+
+_lookup_tsv_map() {
+    local key="$1" file="$2" old new
+    [[ -f "$file" ]] || return 1
+    while IFS=$'\t' read -r old new; do
+        [[ "$old" == "$key" ]] && { printf '%s' "$new"; return 0; }
+    done < "$file"
+    return 1
+}
+
+_apply_tsv_token_map() {
+    local text="$1" file="$2" old new
+    if [[ -f "$file" ]]; then
+        while IFS=$'\t' read -r old new; do
+            [[ -n "$old" ]] || continue
+            text="${text//$old/$new}"
+        done < "$file"
+    fi
+    printf '%s' "$text"
+}
+
+_rewrite_vmess_link_tokens() {
+    local link="$1" token_map_file="$2" body frag="" json old new b64
+    [[ "$link" == vmess://* ]] || { printf '%s\n' "$link"; return; }
+    body="${link#vmess://}"
+    if [[ "$body" == *#* ]]; then
+        frag="#${body#*#}"
+        body="${body%%#*}"
+    fi
+    json=$(_b64_decode "$body" 2>/dev/null) || { printf '%s\n' "$link"; return; }
+    if [[ -f "$token_map_file" ]]; then
+        while IFS=$'\t' read -r old new; do
+            [[ -n "$old" ]] || continue
+            json="${json//$old/$new}"
+        done < "$token_map_file"
+    fi
+    json=$(printf '%s' "$json" | jq -c . 2>/dev/null || printf '%s' "$json")
+    b64=$(_b64_encode "$json")
+    printf 'vmess://%s%s\n' "$b64" "$frag"
+}
+
+_sync_links_after_reset() {
+    local ports_json="$1" port_map_file="$2" token_map_file="$3"
+    local tmp line port new_port ports=()
+    [[ -f "$SB_LINKS" ]] || return 0
+    while IFS= read -r port; do
+        [[ -n "$port" ]] && ports+=("$port")
+    done < <(jq -r '.[]?' <<< "$ports_json" 2>/dev/null)
+    [[ ${#ports[@]} -gt 0 ]] || return 0
+
+    tmp=$(mktemp)
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        port=$(_share_link_port "$line")
+        if [[ -n "$port" ]] && _tag_exists_in_list "$port" "${ports[@]}"; then
+            if new_port=$(_lookup_tsv_map "$port" "$port_map_file"); then
+                line=$(_rewrite_share_link_port "$line" "$port" "$new_port")
+            fi
+            if [[ "$line" == vmess://* ]]; then
+                line=$(_rewrite_vmess_link_tokens "$line" "$token_map_file")
+            else
+                line=$(_apply_tsv_token_map "$line" "$token_map_file")
+            fi
+        fi
+        printf '%s\n' "$line"
+    done < "$SB_LINKS" > "$tmp" || true
+    mv "$tmp" "$SB_LINKS"
+}
+
+_block_has_selected_port() {
+    local block="$1"; shift || true
+    local p
+    for p in "$@"; do
+        [[ -n "$p" ]] || continue
+        if grep -Eq "(^|[[:space:]])(ShadowTLS )?端口[[:space:]]*:[[:space:]]*${p}([^0-9]|$)" <<< "$block"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+_apply_reset_maps_to_block() {
+    local block="$1" port_map_file="$2" token_map_file="$3" old new
+    local line prefix link link_port new_port
+    if [[ -f "$port_map_file" ]]; then
+        while IFS=$'\t' read -r old new; do
+            [[ -n "$old" ]] || continue
+            block="${block//$old/$new}"
+        done < "$port_map_file"
+    fi
+    if [[ -f "$token_map_file" ]]; then
+        while IFS=$'\t' read -r old new; do
+            [[ -n "$old" ]] || continue
+            block="${block//$old/$new}"
+        done < "$token_map_file"
+    fi
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" =~ ^(.*[[:space:]]:[[:space:]]*)([A-Za-z0-9+.-]+://.*)$ ]]; then
+            prefix="${BASH_REMATCH[1]}"
+            link="${BASH_REMATCH[2]}"
+            link_port=$(_share_link_port "$link")
+            if [[ -n "$link_port" ]] && new_port=$(_lookup_tsv_map "$link_port" "$port_map_file"); then
+                link=$(_rewrite_share_link_port "$link" "$link_port" "$new_port")
+            fi
+            if [[ "$link" == vmess://* ]]; then
+                link=$(_rewrite_vmess_link_tokens "$link" "$token_map_file")
+            else
+                link=$(_apply_tsv_token_map "$link" "$token_map_file")
+            fi
+            line="${prefix}${link}"
+        fi
+        printf '%s\n' "$line"
+    done < <(printf '%s' "$block")
+}
+
+_sync_info_after_reset() {
+    local ports_json="$1" port_map_file="$2" token_map_file="$3"
+    local tmp line block="" ports=()
+    [[ -f "$SB_INFO" ]] || return 0
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && ports+=("$line")
+    done < <(jq -r '.[]?' <<< "$ports_json" 2>/dev/null)
+    [[ ${#ports[@]} -gt 0 ]] || return 0
+
+    tmp=$(mktemp)
+    _flush_reset_info_block() {
+        [[ -n "$block" ]] || return 0
+        if _block_has_selected_port "$block" "${ports[@]}"; then
+            _apply_reset_maps_to_block "$block" "$port_map_file" "$token_map_file"
+        else
+            printf '%s' "$block"
+        fi
+        block=""
+    }
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" == "  ["* ]]; then
+            _flush_reset_info_block
+            block="${line}"$'\n'
+        else
+            block+="${line}"$'\n'
+        fi
+    done < "$SB_INFO" > "$tmp"
+    _flush_reset_info_block >> "$tmp"
+    mv "$tmp" "$SB_INFO"
+}
+
+_sync_metadata_after_reset() {
+    local ports_json="$1" port_map_file="$2" token_map_file="$3"
+    _sync_links_after_reset "$ports_json" "$port_map_file" "$token_map_file" || return 1
+    _sync_info_after_reset "$ports_json" "$port_map_file" "$token_map_file" || return 1
 }
 
 delete_node() {
@@ -3246,31 +3552,49 @@ delete_node() {
     fi
 
     mv "$tmp_config" "$SB_CONFIG"
-    local tmp_links
-    tmp_links=$(mktemp)
-    awk -v ports="$ports_json" '
-        BEGIN {
-            gsub(/[][]/, "", ports)
-            n = split(ports, arr, /,/)
-            for (i = 1; i <= n; i++) {
-                gsub(/"/, "", arr[i])
-                gsub(/[[:space:]]/, "", arr[i])
-                if (arr[i] != "") port_map[arr[i]] = 1
-            }
-        }
-        {
-            keep = 1
-            for (p in port_map) {
-                if (index($0, ":" p) > 0) keep = 0
-            }
-            if (keep) print
-        }
-    ' "$SB_LINKS" 2>/dev/null > "$tmp_links" || true
-    mv "$tmp_links" "$SB_LINKS"
+    _clean_links_by_port "$ports_json" || warn "分享链接文件更新失败，已继续"
     _clean_info_blocks_by_port "$ports_json" || warn "节点信息文件更新失败，已继续"
 
     svc_restart || { err "配置已更新，但服务重启失败"; return 1; }
     info "已删除 ${#selected_indices[@]} 个节点"
+}
+
+share_node_link() {
+    require_root
+    [[ -f "$SB_LINKS" ]] || { warn "未找到分享链接文件"; return; }
+
+    local links=() link
+    while IFS= read -r link; do
+        [[ -n "$link" ]] && links+=("$link")
+    done < "$SB_LINKS"
+    if [[ ${#links[@]} -le 0 ]]; then
+        warn "没有可分享的节点"
+        return 0
+    fi
+
+    echo ""
+    echo -e "  ${C_BOLD}可分享节点:${NC}"
+    local i=1
+    for link in "${links[@]}"; do
+        printf "  %d) %s — %s\n" "$i" "$(share_link_proto "$link")" "$(share_link_name "$link" "节点${i}")"
+        (( i++ )) || true
+    done
+    echo ""
+    echo "  返回上一级: 0 / b"
+    ask "请选择要分享的节点 [1-${#links[@]} / 0 / b]:"; read -r share_idx
+    [[ -z "$share_idx" ]] && { info "已返回上一级"; return 0; }
+    [[ "$share_idx" == "0" ]] && { info "已返回上一级"; return 0; }
+    is_back_choice "$share_idx" && { info "已返回上一级"; return 0; }
+
+    [[ "$share_idx" =~ ^[0-9]+$ ]] || { warn "请输入有效序号"; return 1; }
+    (( share_idx >= 1 && share_idx <= ${#links[@]} )) || { warn "序号超出范围"; return 1; }
+
+    local selected_link="${links[$(( share_idx - 1 ))]}"
+    echo ""
+    echo -e "  ${C_BOLD}分享链接:${NC}"
+    echo -e "  ${C_CYAN}${selected_link}${NC}"
+    print_qr "$selected_link"
+    echo ""
 }
 
 # ════════════════════════════════════════════════════════════
@@ -3327,10 +3651,17 @@ reset_ports() {
     done
     [[ ${#selected_indices[@]} -gt 0 ]] || { warn "未选择任何节点"; return 1; }
 
-    local selected_json selected_tags_json credential_tags_json
+    local selected_json selected_tags_json credential_tags_json selected_ports_json
     selected_json=$(printf '%s\n' "${selected_indices[@]}" | jq -R 'tonumber - 1' | jq -s .)
     selected_tags_json=$(jq --argjson idxs "$selected_json" -r '
         [ $idxs[] as $i | .[$i]? | select(. != null) | .tag ] | map(select(. != "")) | unique
+    ' <<< "$items_json") || return 1
+    selected_ports_json=$(jq --argjson idxs "$selected_json" -r '
+        [ $idxs[] as $i
+          | .[$i]?
+          | select(. != null)
+          | (.port | tostring)
+        ] | map(select(. != "" and . != "0")) | unique
     ' <<< "$items_json") || return 1
     credential_tags_json=$(jq --argjson idxs "$selected_json" -r '
         [ $idxs[] as $i
@@ -3353,6 +3684,9 @@ reset_ports() {
 
     local backup; backup=$(mktemp)
     cp "$SB_CONFIG" "$backup"   # 备份原配置,失败时回滚
+    local port_map_file token_map_file
+    port_map_file=$(mktemp)
+    token_map_file=$(mktemp)
 
     local updated; updated=$(cat "$SB_CONFIG")
 
@@ -3365,7 +3699,8 @@ reset_ports() {
             local new_p; new_p=$(random_port)
             updated=$(echo "$updated" | jq --arg tag "$selected_tag" --argjson port "$new_p" '
                 .inbounds |= map(if (.tag // "") == $tag then .listen_port = $port else . end)
-            ') || { err "端口更新失败: $selected_tag"; cp "$backup" "$SB_CONFIG"; rm -f "$backup"; return 1; }
+            ') || { err "端口更新失败: $selected_tag"; cp "$backup" "$SB_CONFIG"; rm -f "$backup" "$port_map_file" "$token_map_file"; return 1; }
+            printf '%s\t%s\n' "$old_p" "$new_p" >> "$port_map_file"
             info "${selected_tag}: 端口 $old_p → $new_p"
             open_port "$new_p" tcp; open_port "$new_p" udp
         done < <(jq --argjson tags "$selected_tags_json" -r '
@@ -3400,7 +3735,17 @@ reset_ports() {
             else
                 new_pwd=$(gen_rand_str 24)
             fi
-            updated=$(echo "$updated" | sed "s|\"password\": \"${old_pwd}\"|\"password\": \"${new_pwd}\"|g")
+            updated=$(printf '%s\n' "$updated" | jq --arg tag "$old_tag" --arg old "$old_pwd" --arg new "$new_pwd" '
+                .inbounds |= map(
+                  if (.tag // "") == $tag then
+                    (if (.password? // "") == $old then .password = $new else . end)
+                    | (if (.users? | type) == "array" then
+                        .users |= map(if (.password? // "") == $old then .password = $new else . end)
+                      else . end)
+                  else . end
+                )
+            ') || { err "密码更新失败: $old_tag"; cp "$backup" "$SB_CONFIG"; rm -f "$backup" "$port_map_file" "$token_map_file"; return 1; }
+            printf '%s\t%s\n' "$old_pwd" "$new_pwd" >> "$token_map_file"
             info "${old_tag}: 密码已更新 (${old_pwd:0:6}… → ${new_pwd:0:6}…)"
         done <<< "$pwd_rows"
 
@@ -3417,22 +3762,43 @@ reset_ports() {
         while IFS=$'\t' read -r old_tag old_uuid; do
             [[ -n "$old_uuid" ]] || continue
             local new_uuid; new_uuid=$(gen_uuid)
-            updated=$(echo "$updated" | sed "s/${old_uuid}/${new_uuid}/g")
+            updated=$(printf '%s\n' "$updated" | jq --arg tag "$old_tag" --arg old "$old_uuid" --arg new "$new_uuid" '
+                .inbounds |= map(
+                  if (.tag // "") == $tag then
+                    (if (.uuid? // "") == $old then .uuid = $new else . end)
+                    | (if (.users? | type) == "array" then
+                        .users |= map(if (.uuid? // "") == $old then .uuid = $new else . end)
+                      else . end)
+                  else . end
+                )
+            ') || { err "UUID 更新失败: $old_tag"; cp "$backup" "$SB_CONFIG"; rm -f "$backup" "$port_map_file" "$token_map_file"; return 1; }
+            printf '%s\t%s\n' "$old_uuid" "$new_uuid" >> "$token_map_file"
             info "${old_tag}: UUID 已更新 (${old_uuid:0:8}… → ${new_uuid:0:8}…)"
         done <<< "$uuid_rows"
     fi
 
-    echo "$updated" > "$SB_CONFIG"
+    local tmp_config; tmp_config=$(mktemp)
+    printf '%s\n' "$updated" > "$tmp_config"
 
-    if "$SB_BIN" check -c "$SB_CONFIG" &>/dev/null; then
-        svc_restart && info "重置完成,服务已重启"
-        # 刷新节点信息文件提示
-        warn "节点信息已变更,请执行菜单 9 重新查看最新链接"
+    if "$SB_BIN" check -c "$tmp_config" &>/dev/null; then
+        mv "$tmp_config" "$SB_CONFIG"
+        _sync_metadata_after_reset "$selected_ports_json" "$port_map_file" "$token_map_file" \
+            && info "节点信息和分享链接已同步" \
+            || warn "节点信息/分享链接同步失败，请重新生成节点后再导入"
+        if svc_restart; then
+            info "重置完成,服务已重启"
+        else
+            err "配置已更新，但服务重启失败"
+            rm -f "$backup" "$port_map_file" "$token_map_file"
+            return 1
+        fi
     else
         err "配置校验失败,回滚至备份"
         cp "$backup" "$SB_CONFIG"
+        "$SB_BIN" check -c "$tmp_config" || true
+        rm -f "$tmp_config"
     fi
-    rm -f "$backup"
+    rm -f "$backup" "$port_map_file" "$token_map_file"
 }
 
 # ════════════════════════════════════════════════════════════
@@ -3692,7 +4058,7 @@ do_update_menu() {
     case "$uc" in
         1) do_update_script ;;
         2) do_update_singbox ;;
-        3) do_update_script; do_update_singbox ;;
+        3) do_update_singbox && do_update_script ;;
         *) info "已返回上一级" ;;
     esac
 }
@@ -3788,12 +4154,14 @@ LOGO
                 echo ""
                 echo -e "  ${C_BOLD}节点管理${NC}"
                 echo "   1) 删除节点"
-                echo "   0) 返回"
-                echo "   b) 返回"
-                ask "请选择 [0/1/b]:"; read -r node_opt
+                echo "   2) 分享节点"
+                echo "   0) 返回上一级"
+                echo "   b) 返回上一级"
+                ask "请选择 [0/1/2/b]:"; read -r node_opt
                 is_back_choice "$node_opt" && node_opt="0"
                 case "$node_opt" in
                     1) delete_node || true ;;
+                    2) share_node_link || true ;;
                     *) : ;;
                 esac ;;
             10) reset_ports || true ;;

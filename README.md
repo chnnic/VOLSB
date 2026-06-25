@@ -11,7 +11,7 @@
     ╚═══╝   ╚═════╝ ╚══════╝╚══════╝╚═════╝
 ```
 
-[![Version](https://img.shields.io/badge/version-1.4.35-blue.svg)](https://github.com/chnnic/VOLSB)
+[![Version](https://img.shields.io/badge/version-1.4.36-blue.svg)](https://github.com/chnnic/VOLSB)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![sing-box](https://img.shields.io/badge/sing--box-1.13.13-orange.svg)](https://github.com/SagerNet/sing-box)
 
@@ -66,7 +66,7 @@ VOLSB 是一个功能完整的 **sing-box 服务端** 一键部署脚本，支�
 | 服务控制 | 启动 / 停止 / 重启 / 查看状态 |
 | 版本管理 | 一键升级 sing-box 核心 / 更新 VOLSB 脚本自身 |
 | 返回逻辑 | 子菜单支持 `0` 或 `b` 返回上一级，协议选择保留 `0=全部协议`、使用 `b` 返回 |
-| 端口重置 | 支持单独重置端口、密码/UUID 或同时重置 |
+| 端口重置 | 支持按节点单选/多选重置端口、密码/UUID 或同时重置 |
 | 流量统计 | Clash API 实时速率 + 按入站端口统计连接数 + 网卡累计流量兜底 |
 | 时间同步 | 四级兜底强制同步系统时间（NTP/chrony/ntpdate/HTTP） |
 | 卸载清理 | 完整移除 sing-box 及所有配置文件 |
@@ -117,7 +117,7 @@ volsb uninstall      # 完全卸载
 ```
   ██╗   ██╗ ██████╗ ██╗     ███████╗██████╗
   ...
-  v1.4.35  |  2026-06-24 04:35:00
+  v1.4.36  |  2026-06-24 04:35:00
 
   状态: ● 运行中
   版本: 1.13.13

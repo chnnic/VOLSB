@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.4.35
+#   版本   : 1.4.36
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS / SS / TUIC
@@ -30,7 +30,7 @@ banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 is_back_choice() { [[ "${1:-}" =~ ^([bBqQ]|back|BACK|返回)$ ]]; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.4.35"
+VOLSB_VER="1.4.36"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 SING_BOX_VER="1.13.13"
 
@@ -3281,6 +3281,16 @@ reset_ports() {
     require_root
     [[ -f "$SB_CONFIG" ]] || { warn "未找到配置文件"; return; }
 
+    local items_json item_count
+    items_json=$(jq -c '[.inbounds[]? | select((.listen // "") != "127.0.0.1") | {tag:(.tag//""),type:(.type//""),port:(.listen_port//0),detour:(.detour//null)}]' "$SB_CONFIG" 2>/dev/null) || {
+        warn "无法读取当前节点列表"; return 1
+    }
+    item_count=$(echo "$items_json" | jq 'length' 2>/dev/null || echo 0)
+    if [[ "$item_count" -le 0 ]]; then
+        warn "没有可重置的节点"
+        return 0
+    fi
+
     echo ""
     echo -e "  ${C_BOLD}重置选项:${NC}"
     echo "   1) 仅重置端口"
@@ -3292,6 +3302,55 @@ reset_ports() {
     is_back_choice "$reset_opt" && { info "已返回上一级"; return 0; }
     [[ -z "$reset_opt" ]] && reset_opt="3"
 
+    echo ""
+    echo -e "  ${C_BOLD}可重置节点:${NC}"
+    echo "$items_json" | jq -r '
+        to_entries[]
+        | "  \(.key + 1)) \(.value.type) 端口:\(.value.port) [\(.value.tag)]\(.value.detour // "" | if . == "" then "" else " -> detour:" + . end)"
+    '
+    echo ""
+    echo "  支持多选: 1 3 5 或 1,3,5"
+    ask "输入要重置的节点序号，回车/0/b返回:"; read -r reset_idx
+    [[ -z "$reset_idx" ]] && { info "已取消"; return 0; }
+    [[ "$reset_idx" == "0" ]] && { info "已返回上一级"; return 0; }
+    is_back_choice "$reset_idx" && { info "已返回上一级"; return 0; }
+
+    reset_idx="${reset_idx//,/ }"
+    local selected_indices=() seen_indices=() idx
+    for idx in $reset_idx; do
+        [[ "$idx" =~ ^[0-9]+$ ]] || { warn "请输入有效序号"; return 1; }
+        (( idx >= 1 && idx <= item_count )) || { warn "序号超出范围: $idx"; return 1; }
+        if ! _tag_exists_in_list "$idx" "${seen_indices[@]}"; then
+            selected_indices+=("$idx")
+            seen_indices+=("$idx")
+        fi
+    done
+    [[ ${#selected_indices[@]} -gt 0 ]] || { warn "未选择任何节点"; return 1; }
+
+    local selected_json selected_tags_json credential_tags_json
+    selected_json=$(printf '%s\n' "${selected_indices[@]}" | jq -R 'tonumber - 1' | jq -s .)
+    selected_tags_json=$(jq --argjson idxs "$selected_json" -r '
+        [ $idxs[] as $i | .[$i]? | select(. != null) | .tag ] | map(select(. != "")) | unique
+    ' <<< "$items_json") || return 1
+    credential_tags_json=$(jq --argjson idxs "$selected_json" -r '
+        [ $idxs[] as $i
+          | .[$i]?
+          | select(. != null)
+          | (.tag, (.detour // empty))
+        ] | map(select(. != "")) | unique
+    ' <<< "$items_json") || return 1
+
+    echo ""
+    echo -e "  将重置 ${C_YELLOW}${#selected_indices[@]}${NC} 个节点:"
+    jq --argjson idxs "$selected_json" -r '
+        $idxs[] as $i
+        | .[$i]?
+        | select(. != null)
+        | "  - \(.tag) 端口:\(.port)\(.detour // "" | if . == "" then "" else " -> detour:" + . end)"
+    ' <<< "$items_json"
+    ask "输入 RESET 确认重置:"; read -r confirm
+    [[ "$confirm" == "RESET" ]] || { info "已取消重置"; return 0; }
+
     local backup; backup=$(mktemp)
     cp "$SB_CONFIG" "$backup"   # 备份原配置,失败时回滚
 
@@ -3300,32 +3359,67 @@ reset_ports() {
     # ── 重置端口 ──
     if [[ "$reset_opt" == "1" || "$reset_opt" == "3" ]]; then
         step "重置入站端口"
-        local ports_old; ports_old=$(jq -r '.inbounds[].listen_port // empty' "$SB_CONFIG")
-        for old_p in $ports_old; do
+        local selected_tag old_p new_p
+        while IFS='|' read -r selected_tag old_p; do
+            [[ -n "$selected_tag" && -n "$old_p" && "$old_p" != "0" ]] || continue
             local new_p; new_p=$(random_port)
-            updated=$(echo "$updated" | sed "s/\"listen_port\": ${old_p}/\"listen_port\": ${new_p}/g")
-            info "端口 $old_p → $new_p"
+            updated=$(echo "$updated" | jq --arg tag "$selected_tag" --argjson port "$new_p" '
+                .inbounds |= map(if (.tag // "") == $tag then .listen_port = $port else . end)
+            ') || { err "端口更新失败: $selected_tag"; cp "$backup" "$SB_CONFIG"; rm -f "$backup"; return 1; }
+            info "${selected_tag}: 端口 $old_p → $new_p"
             open_port "$new_p" tcp; open_port "$new_p" udp
-        done
+        done < <(jq --argjson tags "$selected_tags_json" -r '
+            def hit($x): any($tags[]; . == $x);
+            .inbounds[]? | select(hit(.tag // "")) | [(.tag // ""), (.listen_port // 0)] | join("|")
+        ' "$SB_CONFIG")
     fi
 
     # ── 重置密码/UUID ──
     if [[ "$reset_opt" == "2" || "$reset_opt" == "3" ]]; then
         step "重置密码 / UUID"
-        # 替换所有 password 字段
-        local pwd_list; pwd_list=$(echo "$updated" | jq -r '.. | objects | .password? // empty' 2>/dev/null | sort -u)
-        for old_pwd in $pwd_list; do
-            local new_pwd; new_pwd=$(gen_rand_str 24)
+        local pwd_rows old_tag old_method old_pwd
+        pwd_rows=$(echo "$updated" | jq --argjson tags "$credential_tags_json" -r '
+            def hit($x): any($tags[]; . == $x);
+            .inbounds[]?
+            | select(hit(.tag // ""))
+            | (.tag // "") as $tag
+            | (.method // "") as $method
+            | (if (.password? // "") != "" then [$tag, $method, .password] else empty end),
+              ((.users // [])[]? | select((.password? // "") != "") | [$tag, $method, .password])
+            | @tsv
+        ' 2>/dev/null | sort -u)
+        while IFS=$'\t' read -r old_tag old_method old_pwd; do
+            [[ -n "$old_pwd" ]] || continue
+            local new_pwd pwd_len=24
+            case "$old_method" in
+                2022-blake3-aes-128-gcm) pwd_len=16 ;;
+                2022-blake3-aes-256-gcm|2022-blake3-chacha20-poly1305) pwd_len=32 ;;
+            esac
+            if [[ "$old_method" == 2022-* ]]; then
+                new_pwd=$("$SB_BIN" generate rand --base64 "$pwd_len" 2>/dev/null || openssl rand -base64 "$pwd_len" | tr -d '\n\r')
+            else
+                new_pwd=$(gen_rand_str 24)
+            fi
             updated=$(echo "$updated" | sed "s|\"password\": \"${old_pwd}\"|\"password\": \"${new_pwd}\"|g")
-            info "密码已更新 (${old_pwd:0:6}… → ${new_pwd:0:6}…)"
-        done
-        # 替换所有 uuid 字段
-        local uuid_list; uuid_list=$(echo "$updated" | jq -r '.. | objects | .uuid? // empty' 2>/dev/null | sort -u)
-        for old_uuid in $uuid_list; do
+            info "${old_tag}: 密码已更新 (${old_pwd:0:6}… → ${new_pwd:0:6}…)"
+        done <<< "$pwd_rows"
+
+        local uuid_rows old_uuid
+        uuid_rows=$(echo "$updated" | jq --argjson tags "$credential_tags_json" -r '
+            def hit($x): any($tags[]; . == $x);
+            .inbounds[]?
+            | select(hit(.tag // ""))
+            | (.tag // "") as $tag
+            | (if (.uuid? // "") != "" then [$tag, .uuid] else empty end),
+              ((.users // [])[]? | select((.uuid? // "") != "") | [$tag, .uuid])
+            | @tsv
+        ' 2>/dev/null | sort -u)
+        while IFS=$'\t' read -r old_tag old_uuid; do
+            [[ -n "$old_uuid" ]] || continue
             local new_uuid; new_uuid=$(gen_uuid)
             updated=$(echo "$updated" | sed "s/${old_uuid}/${new_uuid}/g")
-            info "UUID 已更新 (${old_uuid:0:8}… → ${new_uuid:0:8}…)"
-        done
+            info "${old_tag}: UUID 已更新 (${old_uuid:0:8}… → ${new_uuid:0:8}…)"
+        done <<< "$uuid_rows"
     fi
 
     echo "$updated" > "$SB_CONFIG"

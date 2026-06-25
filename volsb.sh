@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.4.33
+#   版本   : 1.4.34
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS / SS / TUIC
@@ -30,7 +30,7 @@ banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 is_back_choice() { [[ "${1:-}" =~ ^([bBqQ]|back|BACK|返回)$ ]]; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.4.33"
+VOLSB_VER="1.4.34"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 SING_BOX_VER="1.13.13"
 
@@ -891,60 +891,74 @@ INFO
 deploy_shadowsocks() {
     step "配置 Shadowsocks"
 
-    local port; ask "监听端口 (回车随机):"; read -r port
-    [[ -z "$port" ]] && port=$(random_port)
+    local base_port; ask "监听端口 (回车随机):"; read -r base_port
+    [[ -z "$base_port" ]] && base_port=$(random_port)
+
+    ask_multi_user_count; local user_count="$USER_COUNT"
+    if [[ "$user_count" -gt 1 ]]; then
+        warn "Shadowsocks 分享链接无法可靠表达同端口多用户，已改为每个节点独立端口"
+    fi
+
+    local ports=("$base_port")
+    local i
+    for i in $(seq 2 "$user_count"); do
+        ports+=("$(random_port)")
+    done
 
     select_ss_method || return 1
-    ask_multi_user_count; local user_count="$USER_COUNT"
 
-    local users_json="["; local idx=0; local first_pwd=""
+    local route_tags=()
+    local port
     local pwd_len=24
     case "$SS_METHOD" in
         2022-blake3-aes-128-gcm) pwd_len=16 ;;
         2022-blake3-aes-256-gcm) pwd_len=32 ;;
     esac
     for i in $(seq 1 "$user_count"); do
+        port="${ports[$(( i - 1 ))]}"
         local pwd
         if [[ "$SS_METHOD" == 2022-* ]]; then
             pwd=$("$SB_BIN" generate rand --base64 "$pwd_len" 2>/dev/null || openssl rand -base64 "$pwd_len" | tr -d '\n\r')
         else
             pwd=$(gen_rand_str 24)
         fi
-        [[ -z "$first_pwd" ]] && first_pwd="$pwd"
-        [[ $idx -gt 0 ]] && users_json+=","
-        (( idx++ )) || true
-        users_json+=$(printf '{"name":"user%s","password":"%s"}' "$i" "$pwd")
         local connect_host; connect_host=$(url_host "$CONNECT_ADDR")
         local userinfo="${SS_METHOD}:${pwd}"
-        local link_b64
-        link_b64=$(printf "%s" "$userinfo" | base64 -w0 2>/dev/null || printf "%s" "$userinfo" | base64 | tr -d '\n')
-        local link="ss://${link_b64}@${connect_host}:${port}#VOLSB-SS-${i}-${port}"
+        local link_raw link_b64 link_b64_body
+        link_raw="ss://$(url_encode "$userinfo")@${connect_host}:${port}#VOLSB-SS-${i}-${port}"
+        link_b64_body=$(printf "%s" "$userinfo" | base64 -w0 2>/dev/null || printf "%s" "$userinfo" | base64 | tr -d '\n')
+        link_b64_body=$(printf "%s" "$link_b64_body" | tr '+/' '-_' | sed 's/=*$//')
+        link_b64="ss://${link_b64_body}@${connect_host}:${port}#VOLSB-SS-${i}-${port}-b64"
+        local tag="ss-in-${port}"
+        route_tags+=("$tag")
+        local link="$link_raw"
         ALL_LINKS+=("$link")
+        ALL_LINKS+=("$link_b64")
         cat >> "$SB_INFO" <<INFO
   [Shadowsocks #${i}]
     地址     : ${CONNECT_ADDR}
     端口     : ${port} (TCP/UDP)
     加密方式 : ${SS_METHOD}
     密码     : ${pwd}
-    链接     : ${link}
+    链接     : ${link_raw}
+    备用链接 : ${link_b64}
 INFO
+        local inbound
+        inbound=$(jq -n \
+            --argjson port  "$port" \
+            --arg     tag   "$tag" \
+            --arg     method "$SS_METHOD" \
+            --arg     password "$pwd" \
+            '{type:"shadowsocks",tag:$tag,listen:"::",listen_port:$port,
+              method:$method,password:$password}')
+        ALL_INBOUNDS+=("$inbound")
+        open_port "$port" tcp
+        open_port "$port" udp
     done
-    users_json+="]"
 
-    local inbound
-    inbound=$(jq -n \
-        --argjson port  "$port" \
-        --argjson users "$users_json" \
-        --arg     method "$SS_METHOD" \
-        --arg     password "$first_pwd" \
-        '{type:"shadowsocks",tag:"ss-in",listen:"::",listen_port:$port,
-           method:$method,password:$password,users:$users}')
-    ALL_INBOUNDS+=("$inbound")
-    ask_inbound_route_mode "ss-in" "Shadowsocks" || return 1
+    ask_inbound_route_mode "${route_tags[0]}" "Shadowsocks" "${route_tags[@]:1}" || return 1
 
-    open_port "$port" tcp
-    open_port "$port" udp
-    info "✓ Shadowsocks | 端口:$port | 用户数:$user_count | 加密:$SS_METHOD"
+    info "✓ Shadowsocks | 首端口:${ports[0]} | 节点数:$user_count | 加密:$SS_METHOD"
 }
 
 # ────── 协议 3: VMess + WebSocket ──────
@@ -1441,6 +1455,8 @@ INFO
 ask_inbound_route_mode() {
     local tag="$1" label="${2:-$1}"
     local mode="${VOLSB_ROUTE_MODE:-${VOLSB_ROUTE_PROFILE:-}}"
+    shift 2 || true
+    local tags=("$tag" "$@")
 
     if [[ -z "$mode" ]]; then
         echo ""
@@ -1460,28 +1476,28 @@ ask_inbound_route_mode() {
     case "$mode" in
         2|home|ss|ss-home-all|all-ss-home|all-home)
             ensure_route_home_config || return 1
-            ROUTE_HOME_TAGS+=("$tag")
+            ROUTE_HOME_TAGS+=("${tags[@]}")
             info "路由: ${label} → 全部 SS 家宽"
             ;;
         3|ai|ai-ss|ss-home|split|hk-jp)
             ensure_route_ss_config || return 1
-            ROUTE_SPLIT_TAGS+=("$tag")
+            ROUTE_SPLIT_TAGS+=("${tags[@]}")
             info "路由: ${label} → AI 分流 / 默认 SS 家宽"
             ;;
         4|ai-direct|ai-only|split-direct)
             ensure_route_ai_config || return 1
-            ROUTE_SPLIT_DIRECT_TAGS+=("$tag")
+            ROUTE_SPLIT_DIRECT_TAGS+=("${tags[@]}")
             record_route_ai_direct_info
             info "路由: ${label} → AI 转发 / 默认 VPS 直连"
             ;;
         5|ai-ss-udp-direct|udp-direct|split-udp-direct)
             ensure_route_ss_config || return 1
-            ROUTE_SPLIT_UDP_DIRECT_TAGS+=("$tag")
+            ROUTE_SPLIT_UDP_DIRECT_TAGS+=("${tags[@]}")
             record_route_ai_home_udp_direct_info
             info "路由: ${label} → AI 分流 / TCP 默认 SS 家宽 / UDP 默认 VPS 直连"
             ;;
         *)
-            ROUTE_DIRECT_TAGS+=("$tag")
+            ROUTE_DIRECT_TAGS+=("${tags[@]}")
             info "路由: ${label} → 直连 VPS 出口"
             ;;
     esac

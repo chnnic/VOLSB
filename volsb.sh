@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.4.39
+#   版本   : 1.4.40
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS / SS / TUIC
@@ -30,7 +30,7 @@ banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 is_back_choice() { [[ "${1:-}" =~ ^([bBqQ]|back|BACK|返回)$ ]]; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.4.39"
+VOLSB_VER="1.4.40"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 SING_BOX_VER="1.13.13"
 
@@ -3092,11 +3092,9 @@ HDR
     if [[ -f "$SB_INFO" ]]; then
         echo ""
         echo -e "  ${C_BOLD}节点详情:${NC}"
-        # 检查 SB_INFO 里的端口是否和 config.json 一致
-        local config_ports info_ports stale=false
-        config_ports=$(jq -r '.inbounds[].listen_port | tostring' "$SB_CONFIG" 2>/dev/null | tr '\n' ' ')
+        local config_ports info_ports stale=false tmp_info
+        config_ports=$(jq -r '.inbounds[].listen_port | tostring' "$SB_CONFIG" 2>/dev/null | sort -u | tr '\n' ' ')
         info_ports=$(grep -oP '端口\s*:\s*\K[0-9]+' "$SB_INFO" 2>/dev/null | sort -u | tr '\n' ' ')
-        # 若 SB_INFO 里有 config.json 里不存在的端口，说明有旧数据
         for p in $info_ports; do
             if ! echo "$config_ports" | grep -qw "$p"; then
                 stale=true; break
@@ -3104,10 +3102,47 @@ HDR
         done
         if $stale; then
             warn "节点信息含旧数据（端口 $info_ports 与当前配置 $config_ports 不完全匹配）"
-            warn "建议重新安装以同步节点信息: 菜单选 1"
+            warn "已仅展示当前配置中的节点"
             echo ""
+            tmp_info=$(mktemp)
+            awk -v ports="$config_ports" '
+                BEGIN {
+                    gsub(/[[:space:]]+/, " ", ports)
+                    split(ports, arr, / /)
+                    for (i in arr) if (arr[i] != "") port_map[arr[i]] = 1
+                }
+                function has_port(block,    p) {
+                    for (p in port_map) {
+                        if (block ~ ("端口[[:space:]]*:[[:space:]]*" p "([^0-9]|$)")) return 1
+                        if (block ~ ("ShadowTLS 端口[[:space:]]*:[[:space:]]*" p "([^0-9]|$)")) return 1
+                    }
+                    return 0
+                }
+                function flush() {
+                    if (block == "") return
+                    if (keep_block) printf "%s", block
+                    block = ""
+                    keep_block = 0
+                }
+                /^  \[/ {
+                    flush()
+                    block = $0 ORS
+                    keep_block = 1
+                    if ($0 !~ /^  \[(出口系统|分流系统)\]/) {
+                        if (!has_port(block)) keep_block = 0
+                    }
+                    next
+                }
+                {
+                    block = block $0 ORS
+                }
+                END { flush() }
+            ' "$SB_INFO" > "$tmp_info"
+            format_nodes_info "$tmp_info"
+            rm -f "$tmp_info"
+        else
+            format_nodes_info "$SB_INFO"
         fi
-        format_nodes_info "$SB_INFO"
     fi
 
     # ── 展示所有分享链接（带编号和二维码）──

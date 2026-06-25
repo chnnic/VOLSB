@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.4.32
+#   版本   : 1.4.33
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS / SS / TUIC
@@ -30,7 +30,7 @@ banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 is_back_choice() { [[ "${1:-}" =~ ^([bBqQ]|back|BACK|返回)$ ]]; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.4.32"
+VOLSB_VER="1.4.33"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 SING_BOX_VER="1.13.13"
 
@@ -239,18 +239,31 @@ svc_active()  {
 }
 
 # ──────────────────────── 工具函数 ────────────────────────
-get_public_ip() {
+get_public_ipv4() {
     local ip=""
-    # 依次尝试多个 API，优先 IPv4
     for api in         "https://api.ipify.org"         "https://ipinfo.io/ip"         "https://ifconfig.me/ip"         "https://icanhazip.com"         "https://ipecho.net/plain"; do
         ip=$(curl -fsSL --max-time 5 "$api" 2>/dev/null | tr -d '[:space:]')
-        # 校验是否为合法 IPv4 格式
         if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "$ip"; return 0
         fi
     done
-    # IPv6 fallback
-    ip=$(curl -fsSL --max-time 5 "https://api6.ipify.org" 2>/dev/null | tr -d '[:space:]')
+    echo ""
+}
+
+get_public_ipv6() {
+    local ip=""
+    for api in "https://api6.ipify.org" "https://ifconfig.co/ip"; do
+        ip=$(curl -6 -fsSL --max-time 5 "$api" 2>/dev/null | tr -d '[:space:]')
+        [[ "$ip" == *:* ]] && { echo "$ip"; return 0; }
+    done
+    echo ""
+}
+
+get_public_ip() {
+    local ip=""
+    ip=$(get_public_ipv4)
+    [[ -n "$ip" ]] && { echo "$ip"; return 0; }
+    ip=$(get_public_ipv6)
     [[ "$ip" == *:* ]] && echo "$ip" || echo ""
 }
 
@@ -676,20 +689,25 @@ ask_connect_addr() {
         info "连接地址 (环境变量): $CONNECT_ADDR"; return
     fi
 
-    local auto_ip; auto_ip=$(get_public_ip)
+    local auto_ipv4 auto_ipv6
+    auto_ipv4=$(get_public_ipv4)
+    auto_ipv6=$(get_public_ipv6)
     echo ""
     echo -e "  ${C_BOLD}客户端连接地址${NC}（填入客户端的服务器地址）:"
-    echo -e "  ① 自动检测本机公网IP: ${C_CYAN}${auto_ip:-检测失败}${NC}"
-    echo    "  ② 手动输入（如有域名/DDNS 可在此填入）"
+    echo -e "  ① 自动检测公网 IPv4: ${C_CYAN}${auto_ipv4:-检测失败}${NC}"
+    echo -e "  ② 自动检测公网 IPv6: ${C_CYAN}${auto_ipv6:-检测失败}${NC}"
+    echo    "  ③ 手动输入（如有域名/DDNS 可在此填入）"
     echo    "  0) 返回上一级"
-    ask "选择 [0/1/2] 默认1:"; read -r opt
+    ask "选择 [0/1/2/3] 默认1:"; read -r opt
     [[ "$opt" == "0" ]] && { info "已返回上一级"; return 1; }
     is_back_choice "$opt" && { info "已返回上一级"; return 1; }
     if [[ "$opt" == "2" ]]; then
+        CONNECT_ADDR="${auto_ipv6:-${auto_ipv4:-127.0.0.1}}"
+    elif [[ "$opt" == "3" ]]; then
         ask "输入 IP 或域名:"; read -r CONNECT_ADDR
-        [[ -z "$CONNECT_ADDR" ]] && CONNECT_ADDR="${auto_ip:-127.0.0.1}"
+        [[ -z "$CONNECT_ADDR" ]] && CONNECT_ADDR="${auto_ipv4:-${auto_ipv6:-127.0.0.1}}"
     else
-        CONNECT_ADDR="${auto_ip:-127.0.0.1}"
+        CONNECT_ADDR="${auto_ipv4:-${auto_ipv6:-127.0.0.1}}"
     fi
     info "连接地址: $CONNECT_ADDR"
 }
@@ -701,21 +719,26 @@ ask_relay_connect_addr() {
         info "线路机连接地址 (环境变量): $CONNECT_ADDR"; return
     fi
 
-    local auto_ip; auto_ip=$(get_public_ip)
+    local auto_ipv4 auto_ipv6
+    auto_ipv4=$(get_public_ipv4)
+    auto_ipv6=$(get_public_ipv6)
     echo ""
     echo -e "  ${C_BOLD}线路机（本机）对外连接地址${NC}"
     echo    "  客户端将连接此地址，线路机再转发到落地机"
-    echo -e "  ① 自动检测本机公网IP: ${C_CYAN}${auto_ip:-检测失败}${NC}"
-    echo    "  ② 手动输入（如有域名/DDNS）"
+    echo -e "  ① 自动检测公网 IPv4: ${C_CYAN}${auto_ipv4:-检测失败}${NC}"
+    echo -e "  ② 自动检测公网 IPv6: ${C_CYAN}${auto_ipv6:-检测失败}${NC}"
+    echo    "  ③ 手动输入（如有域名/DDNS）"
     echo    "  0) 返回上一级"
-    ask "选择 [0/1/2] 默认1:"; read -r opt
+    ask "选择 [0/1/2/3] 默认1:"; read -r opt
     [[ "$opt" == "0" ]] && { info "已返回上一级"; return 1; }
     is_back_choice "$opt" && { info "已返回上一级"; return 1; }
     if [[ "$opt" == "2" ]]; then
+        CONNECT_ADDR="${auto_ipv6:-${auto_ipv4:-127.0.0.1}}"
+    elif [[ "$opt" == "3" ]]; then
         ask "输入线路机 IP 或域名:"; read -r CONNECT_ADDR
-        [[ -z "$CONNECT_ADDR" ]] && CONNECT_ADDR="${auto_ip:-127.0.0.1}"
+        [[ -z "$CONNECT_ADDR" ]] && CONNECT_ADDR="${auto_ipv4:-${auto_ipv6:-127.0.0.1}}"
     else
-        CONNECT_ADDR="${auto_ip:-127.0.0.1}"
+        CONNECT_ADDR="${auto_ipv4:-${auto_ipv6:-127.0.0.1}}"
     fi
     info "线路机连接地址: $CONNECT_ADDR"
 }

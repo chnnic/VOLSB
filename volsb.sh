@@ -32,6 +32,7 @@ is_back_choice() { [[ "${1:-}" =~ ^([bBqQ]|back|BACK|返回)$ ]]; }
 # ──────────────────────── 全局路径 ────────────────────────
 VOLSB_VER="1.4.30"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
+SING_BOX_VER="1.13.13"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
 # VOLSB_IP        : 指定连接地址,跳过 IP 检测提示
@@ -139,12 +140,7 @@ install_deps() {
 
 # ──────────────────────── sing-box 下载安装 ────────────────────────
 get_latest_version() {
-    local v
-    v=$(curl -fsSL --max-time 10 \
-        "https://api.github.com/repos/SagerNet/sing-box/releases/latest" \
-        | jq -r '.tag_name // empty' 2>/dev/null | sed 's/^v//')
-    [[ -n "$v" ]] || die "获取最新版本失败,请检查网络或 GitHub 访问"
-    echo "$v"
+    echo "$SING_BOX_VER"
 }
 
 install_binary() {
@@ -3138,14 +3134,14 @@ do_install() {
     install_deps
     setup_dirs
 
-    step "获取 sing-box 最新版本"
+    step "获取 sing-box 固定版本"
     local ver; ver=$(get_latest_version)
     if [[ -x "$SB_BIN" ]]; then
         local cur; cur=$("$SB_BIN" version 2>/dev/null | awk '{print $3}' | head -1)
         if [[ "$cur" == "$ver" ]]; then
-            warn "sing-box 已是最新版本 v${ver}，跳过下载，继续配置"
+            warn "sing-box 已固定为 v${ver}，跳过下载，继续配置"
         else
-            info "当前 v${cur} → 最新 v${ver}，升级中..."
+            info "当前 v${cur} → 固定 v${ver}，切换中..."
             install_binary "$ver"
         fi
     else
@@ -3245,9 +3241,9 @@ do_update_singbox() {
     cur=$("$SB_BIN" version | awk '{print $3}' | head -1)
     new=$(get_latest_version)
     if [[ "$cur" == "$new" ]]; then
-        info "sing-box 已是最新版本 v${cur}"; return
+        info "sing-box 已固定为 v${cur}"; return
     fi
-    info "升级 sing-box: v${cur} → v${new}"
+    info "切换 sing-box: v${cur} → 固定 v${new}"
     install_binary "$new"
     svc_restart && info "sing-box 升级完成 ✔"
 }

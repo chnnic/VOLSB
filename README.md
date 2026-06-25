@@ -29,7 +29,7 @@ VOLSB 是一个功能完整的 **sing-box 服务端** 一键部署脚本，支�
 
 | 功能 | 说明 |
 |------|------|
-| 一键安装 | 自动下载 sing-box 最新版并部署 |
+| 一键安装 | 自动下载并固定 sing-box 1.13.13 后部署 |
 | 多协议支持 | VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS v3 / AnyTLS |
 | 证书复用 | Hysteria2 / Trojan / AnyTLS 支持复用已有证书、自签证书或 Let's Encrypt 正式证书 |
 | 多节点生成 | 每个协议支持同时生成 1-10 个节点（独立 UUID/密码） |

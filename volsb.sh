@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.4.34
+#   版本   : 1.4.35
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS / SS / TUIC
@@ -30,7 +30,7 @@ banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 is_back_choice() { [[ "${1:-}" =~ ^([bBqQ]|back|BACK|返回)$ ]]; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.4.34"
+VOLSB_VER="1.4.35"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 SING_BOX_VER="1.13.13"
 
@@ -3109,14 +3109,29 @@ count_saved_links() {
 }
 
 _clean_info_blocks_by_port() {
-    local port="$1" tmp
+    local ports_json="$1" tmp
     tmp=$(mktemp)
-    awk -v port="$port" '
+    awk -v ports="$ports_json" '
+        BEGIN {
+            gsub(/[][]/, "", ports)
+            n = split(ports, arr, /,/)
+            for (i = 1; i <= n; i++) {
+                gsub(/"/, "", arr[i])
+                gsub(/[[:space:]]/, "", arr[i])
+                if (arr[i] != "") port_map[arr[i]] = 1
+            }
+        }
+        function block_has_port(    p) {
+            for (p in port_map) {
+                if (block ~ ("端口[[:space:]]*:[[:space:]]*" p "([^0-9]|$)")) return 1
+                if (block ~ ("ShadowTLS 端口[[:space:]]*:[[:space:]]*" p "([^0-9]|$)")) return 1
+            }
+            return 0
+        }
         function flush_block(    keep) {
             if (block == "") return
             keep = 1
-            if (block ~ ("端口[[:space:]]*:[[:space:]]*" port "([^0-9]|$)")) keep = 0
-            if (block ~ ("ShadowTLS 端口[[:space:]]*:[[:space:]]*" port "([^0-9]|$)")) keep = 0
+            if (block_has_port()) keep = 0
             if (keep) printf "%s", block
             block = ""
         }
@@ -3157,32 +3172,51 @@ delete_node() {
         | "  \(.key + 1)) \(.value.type) 端口:\(.value.port) [\(.value.tag)]\(.value.detour // "" | if . == "" then "" else " -> detour:" + . end)"
     '
     echo ""
+    echo "  支持多选: 1 3 5 或 1,3,5"
     ask "输入要删除的节点序号，回车/0/b返回:"; read -r del_idx
     [[ -z "$del_idx" ]] && { info "已取消"; return 0; }
     [[ "$del_idx" == "0" ]] && { info "已返回上一级"; return 0; }
     is_back_choice "$del_idx" && { info "已返回上一级"; return 0; }
-    [[ "$del_idx" =~ ^[0-9]+$ ]] || { warn "请输入有效序号"; return 1; }
-    (( del_idx >= 1 && del_idx <= item_count )) || { warn "序号超出范围"; return 1; }
 
-    local target
-    target=$(echo "$items_json" | jq -c ".[$((del_idx - 1))]") || return 1
-    local target_tag target_port target_detour
-    target_tag=$(echo "$target" | jq -r '.tag')
-    target_port=$(echo "$target" | jq -r '.port')
-    target_detour=$(echo "$target" | jq -r '.detour // empty')
+    del_idx="${del_idx//,/ }"
+    local selected_indices=() seen_indices=() idx
+    for idx in $del_idx; do
+        [[ "$idx" =~ ^[0-9]+$ ]] || { warn "请输入有效序号"; return 1; }
+        (( idx >= 1 && idx <= item_count )) || { warn "序号超出范围: $idx"; return 1; }
+        if ! _tag_exists_in_list "$idx" "${seen_indices[@]}"; then
+            selected_indices+=("$idx")
+            seen_indices+=("$idx")
+        fi
+    done
+    [[ ${#selected_indices[@]} -gt 0 ]] || { warn "未选择任何节点"; return 1; }
+
+    local selected_json tags_json ports_json
+    selected_json=$(printf '%s\n' "${selected_indices[@]}" | jq -R 'tonumber - 1' | jq -s .)
+    tags_json=$(jq --argjson idxs "$selected_json" -r '
+        [ $idxs[] as $i
+          | .[$i]?
+          | select(. != null)
+          | (.tag, (.detour // empty))
+        ] | map(select(. != "")) | unique
+    ' <<< "$items_json") || return 1
+    ports_json=$(jq --argjson idxs "$selected_json" -r '
+        [ $idxs[] as $i
+          | .[$i]?
+          | select(. != null)
+          | (.port | tostring)
+        ] | map(select(. != "" and . != "0")) | unique
+    ' <<< "$items_json") || return 1
 
     echo ""
-    echo -e "  将删除: ${C_YELLOW}${target_tag}${NC} 端口 ${C_CYAN}${target_port}${NC}"
-    [[ -n "$target_detour" ]] && echo -e "  同时删除 detour 后端: ${C_YELLOW}${target_detour}${NC}"
+    echo -e "  将删除 ${C_YELLOW}${#selected_indices[@]}${NC} 个节点:"
+    jq --argjson idxs "$selected_json" -r '
+        $idxs[] as $i
+        | .[$i]?
+        | select(. != null)
+        | "  - \(.tag) 端口:\(.port)\(.detour // "" | if . == "" then "" else " -> detour:" + . end)"
+    ' <<< "$items_json"
     ask "输入 DELETE 确认删除:"; read -r confirm
     [[ "$confirm" == "DELETE" ]] || { info "已取消删除"; return 0; }
-
-    local tags_json
-    if [[ -n "$target_detour" ]]; then
-        tags_json=$(printf '%s\n%s\n' "$target_tag" "$target_detour" | jq -R . | jq -s 'unique')
-    else
-        tags_json=$(printf '%s\n' "$target_tag" | jq -R . | jq -s 'unique')
-    fi
 
     local tmp_config
     tmp_config=$(mktemp)
@@ -3214,12 +3248,29 @@ delete_node() {
     mv "$tmp_config" "$SB_CONFIG"
     local tmp_links
     tmp_links=$(mktemp)
-    awk -v port="$target_port" 'index($0, ":" port) == 0' "$SB_LINKS" 2>/dev/null > "$tmp_links" || true
+    awk -v ports="$ports_json" '
+        BEGIN {
+            gsub(/[][]/, "", ports)
+            n = split(ports, arr, /,/)
+            for (i = 1; i <= n; i++) {
+                gsub(/"/, "", arr[i])
+                gsub(/[[:space:]]/, "", arr[i])
+                if (arr[i] != "") port_map[arr[i]] = 1
+            }
+        }
+        {
+            keep = 1
+            for (p in port_map) {
+                if (index($0, ":" p) > 0) keep = 0
+            }
+            if (keep) print
+        }
+    ' "$SB_LINKS" 2>/dev/null > "$tmp_links" || true
     mv "$tmp_links" "$SB_LINKS"
-    _clean_info_blocks_by_port "$target_port" || warn "节点信息文件更新失败，已继续"
+    _clean_info_blocks_by_port "$ports_json" || warn "节点信息文件更新失败，已继续"
 
     svc_restart || { err "配置已更新，但服务重启失败"; return 1; }
-    info "已删除节点 ${target_tag}"
+    info "已删除 ${#selected_indices[@]} 个节点"
 }
 
 # ════════════════════════════════════════════════════════════

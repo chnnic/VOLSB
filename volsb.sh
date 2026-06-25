@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.4.31
+#   版本   : 1.4.32
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS / SS / TUIC
@@ -30,7 +30,7 @@ banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 is_back_choice() { [[ "${1:-}" =~ ^([bBqQ]|back|BACK|返回)$ ]]; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.4.31"
+VOLSB_VER="1.4.32"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 SING_BOX_VER="1.13.13"
 
@@ -638,9 +638,11 @@ select_ss_method() {
     local choice
     echo "  Shadowsocks 加密方式:"
     echo "   1) 2022-blake3-aes-128-gcm (推荐)"
-    echo "   2) aes-128-gcm"
+    echo "   2) 2022-blake3-aes-256-gcm"
+    echo "   3) aes-128-gcm"
+    echo "   4) aes-256-gcm"
     echo "   0) 返回上一级"
-    ask "选择 [0/1/2] 默认1:"; read -r choice
+    ask "选择 [0/1/2/3/4] 默认1:"; read -r choice
     if [[ "$choice" == "0" ]] || is_back_choice "$choice"; then
         info "已返回上一级"; return 1
     fi
@@ -650,7 +652,13 @@ select_ss_method() {
             SS_METHOD="2022-blake3-aes-128-gcm"
             ;;
         2)
+            SS_METHOD="2022-blake3-aes-256-gcm"
+            ;;
+        3)
             SS_METHOD="aes-128-gcm"
+            ;;
+        4)
+            SS_METHOD="aes-256-gcm"
             ;;
         *)
             err "Shadowsocks 加密方式选择无效"
@@ -867,10 +875,15 @@ deploy_shadowsocks() {
     ask_multi_user_count; local user_count="$USER_COUNT"
 
     local users_json="["; local idx=0; local first_pwd=""
+    local pwd_len=24
+    case "$SS_METHOD" in
+        2022-blake3-aes-128-gcm) pwd_len=16 ;;
+        2022-blake3-aes-256-gcm) pwd_len=32 ;;
+    esac
     for i in $(seq 1 "$user_count"); do
         local pwd
         if [[ "$SS_METHOD" == 2022-* ]]; then
-            pwd=$("$SB_BIN" generate rand --base64 16 2>/dev/null || openssl rand -base64 16 | tr -d '\n\r')
+            pwd=$("$SB_BIN" generate rand --base64 "$pwd_len" 2>/dev/null || openssl rand -base64 "$pwd_len" | tr -d '\n\r')
         else
             pwd=$(gen_rand_str 24)
         fi

@@ -11,7 +11,7 @@
     ╚═══╝   ╚═════╝ ╚══════╝╚══════╝╚═════╝
 ```
 
-[![Version](https://img.shields.io/badge/version-1.4.30-blue.svg)](https://github.com/chnnic/VOLSB)
+[![Version](https://img.shields.io/badge/version-1.4.31-blue.svg)](https://github.com/chnnic/VOLSB)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![sing-box](https://img.shields.io/badge/sing--box-1.13.13-orange.svg)](https://github.com/SagerNet/sing-box)
 
@@ -30,8 +30,8 @@ VOLSB 是一个功能完整的 **sing-box 服务端** 一键部署脚本，支�
 | 功能 | 说明 |
 |------|------|
 | 一键安装 | 自动下载并固定 sing-box 1.13.13 后部署 |
-| 多协议支持 | VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS v3 / AnyTLS |
-| 证书复用 | Hysteria2 / Trojan / AnyTLS 支持复用已有证书、自签证书或 Let's Encrypt 正式证书 |
+| 多协议支持 | VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS v3 / AnyTLS / Shadowsocks / TUIC |
+| 证书复用 | Hysteria2 / Trojan / AnyTLS / TUIC 支持复用已有证书、自签证书或 Let's Encrypt 正式证书 |
 | 多节点生成 | 每个协议支持同时生成 1-10 个节点（独立 UUID/密码） |
 | 按节点出口 | 每个入站节点组可选择 VPS 直连、全部 SS 家宽、AI 分流 + SS 家宽，或 AI 分流 + VPS 直连 |
 | UDP 分流 | 支持普通 TCP 走 SS 家宽、普通 UDP 走 VPS 直连，绕开家宽 UDP unknown |
@@ -53,6 +53,8 @@ VOLSB 是一个功能完整的 **sing-box 服务端** 一键部署脚本，支�
 |------|------|
 | 一键部署 | VLESS+Reality 入站 → Shadowsocks 出站 → 落地机 |
 | SS 链接解析 | 支持直接粘贴 `ss://` 链接自动解析落地机信息 |
+| SS 节点输出 | 可直接生成 Shadowsocks 入站 `ss://` 分享链接 |
+| TUIC 节点输出 | 可直接生成 TUIC 入站分享链接 |
 | 手动输入 | 支持手动填写落地机 IP、端口、密码、加密方式 |
 | 连通性验证 | 自动验证转发链路，支持选择不同入站端口和多个 SS 出站逐个检测 |
 | 一键安装命令 | 生成可直接在其他 VPS 运行的线路机安装命令 |
@@ -115,7 +117,7 @@ volsb uninstall      # 完全卸载
 ```
   ██╗   ██╗ ██████╗ ██╗     ███████╗██████╗
   ...
-  v1.4.30  |  2026-06-24 04:35:00
+  v1.4.31  |  2026-06-24 04:35:00
 
   状态: ● 运行中
   版本: 1.13.13
@@ -159,6 +161,8 @@ volsb uninstall      # 完全卸载
 | 4 | Trojan + TLS | TCP | 经典方案，客户端兼容性好 |
 | 5 | ShadowTLS v3 + Shadowsocks | TCP | 流量伪装为真实 TLS 握手 |
 | 6 | AnyTLS | TCP | 支持自签 / Let's Encrypt / Reality |
+| 7 | Shadowsocks | TCP/UDP | 直接生成 `ss://` 分享链接 |
+| 8 | TUIC | UDP | QUIC 协议，适合弱网 |
 
 ---
 

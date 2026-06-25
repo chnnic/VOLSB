@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.4.30
+#   版本   : 1.4.31
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
-#   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS
+#   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS / SS / TUIC
 #   系统   : Alpine(OpenRC) / Debian / Ubuntu / CentOS / RHEL /
 #             Alma / Rocky / Fedora / openSUSE / Arch
 #   快捷键 : 安装后输入 volsb 进入管理界面
@@ -30,7 +30,7 @@ banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 is_back_choice() { [[ "${1:-}" =~ ^([bBqQ]|back|BACK|返回)$ ]]; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.4.30"
+VOLSB_VER="1.4.31"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 SING_BOX_VER="1.13.13"
 
@@ -263,6 +263,11 @@ url_host() {
     else
         echo "$host"
     fi
+}
+
+url_encode() {
+    local s="$1"
+    printf '%s' "$s" | sed -e 's/%/%25/g' -e 's/ /%20/g' -e 's/:/%3A/g' -e 's/+/%2B/g' -e 's/\//%2F/g' -e 's/=/%3D/g'
 }
 
 random_port() {
@@ -629,6 +634,32 @@ select_tls_cert_mode_from_choice() {
     esac
 }
 
+select_ss_method() {
+    local choice
+    echo "  Shadowsocks 加密方式:"
+    echo "   1) 2022-blake3-aes-128-gcm (推荐)"
+    echo "   2) aes-128-gcm"
+    echo "   0) 返回上一级"
+    ask "选择 [0/1/2] 默认1:"; read -r choice
+    if [[ "$choice" == "0" ]] || is_back_choice "$choice"; then
+        info "已返回上一级"; return 1
+    fi
+    [[ -z "$choice" ]] && choice="1"
+    case "$choice" in
+        1)
+            SS_METHOD="2022-blake3-aes-128-gcm"
+            ;;
+        2)
+            SS_METHOD="aes-128-gcm"
+            ;;
+        *)
+            err "Shadowsocks 加密方式选择无效"
+            return 1
+            ;;
+    esac
+    info "已选择 Shadowsocks 加密方式: ${SS_METHOD}"
+}
+
 # ────── 公共参数收集:连接IP/域名 ──────
 ask_connect_addr() {
     # 支持环境变量 VOLSB_IP 跳过交互
@@ -825,6 +856,61 @@ INFO
     info "✓ Hysteria2 | 端口:$port (UDP) | 用户数:$user_count"
 }
 
+# ────── 协议 2.5: Shadowsocks ──────
+deploy_shadowsocks() {
+    step "配置 Shadowsocks"
+
+    local port; ask "监听端口 (回车随机):"; read -r port
+    [[ -z "$port" ]] && port=$(random_port)
+
+    select_ss_method || return 1
+    ask_multi_user_count; local user_count="$USER_COUNT"
+
+    local users_json="["; local idx=0; local first_pwd=""
+    for i in $(seq 1 "$user_count"); do
+        local pwd
+        if [[ "$SS_METHOD" == 2022-* ]]; then
+            pwd=$("$SB_BIN" generate rand --base64 16 2>/dev/null || openssl rand -base64 16 | tr -d '\n\r')
+        else
+            pwd=$(gen_rand_str 24)
+        fi
+        [[ -z "$first_pwd" ]] && first_pwd="$pwd"
+        [[ $idx -gt 0 ]] && users_json+=","
+        (( idx++ )) || true
+        users_json+=$(printf '{"name":"user%s","password":"%s"}' "$i" "$pwd")
+        local connect_host; connect_host=$(url_host "$CONNECT_ADDR")
+        local userinfo="${SS_METHOD}:${pwd}"
+        local link_b64
+        link_b64=$(printf "%s" "$userinfo" | base64 -w0 2>/dev/null || printf "%s" "$userinfo" | base64 | tr -d '\n')
+        local link="ss://${link_b64}@${connect_host}:${port}#VOLSB-SS-${i}-${port}"
+        ALL_LINKS+=("$link")
+        cat >> "$SB_INFO" <<INFO
+  [Shadowsocks #${i}]
+    地址     : ${CONNECT_ADDR}
+    端口     : ${port} (TCP/UDP)
+    加密方式 : ${SS_METHOD}
+    密码     : ${pwd}
+    链接     : ${link}
+INFO
+    done
+    users_json+="]"
+
+    local inbound
+    inbound=$(jq -n \
+        --argjson port  "$port" \
+        --argjson users "$users_json" \
+        --arg     method "$SS_METHOD" \
+        --arg     password "$first_pwd" \
+        '{type:"shadowsocks",tag:"ss-in",listen:"::",listen_port:$port,
+           method:$method,password:$password,users:$users}')
+    ALL_INBOUNDS+=("$inbound")
+    ask_inbound_route_mode "ss-in" "Shadowsocks" || return 1
+
+    open_port "$port" tcp
+    open_port "$port" udp
+    info "✓ Shadowsocks | 端口:$port | 用户数:$user_count | 加密:$SS_METHOD"
+}
+
 # ────── 协议 3: VMess + WebSocket ──────
 deploy_vmess_ws() {
     step "配置 VMess + WebSocket"
@@ -916,6 +1002,62 @@ INFO
 
     open_port "$port" tcp
     info "✓ Trojan | 端口:$port | 用户数:$user_count"
+}
+
+# ────── 协议 4.5: TUIC ──────
+deploy_tuic() {
+    step "配置 TUIC"
+
+    local port; ask "监听端口 (回车随机):"; read -r port
+    [[ -z "$port" ]] && port=$(random_port)
+
+    select_tls_cert_mode "TLS 证书" || return 1
+    local masq_domain="$SELECTED_TLS_DOMAIN"
+    local cert_path="$SELECTED_TLS_CERT_PATH"
+    local key_path="$SELECTED_TLS_KEY_PATH"
+    local insecure="$SELECTED_TLS_INSECURE"
+
+    ask_multi_user_count; local user_count="$USER_COUNT"
+    local users_json="["; local idx=0
+    for i in $(seq 1 "$user_count"); do
+        local uuid pwd
+        uuid=$(gen_uuid)
+        pwd=$(gen_rand_str 24)
+        [[ $idx -gt 0 ]] && users_json+=","
+        (( idx++ )) || true
+        users_json+=$(printf '{"name":"user%s","uuid":"%s","password":"%s"}' "$i" "$uuid" "$pwd")
+        local link_host; link_host=$(url_host "$CONNECT_ADDR")
+        local ins_param=""
+        [[ "$insecure" == "true" ]] && ins_param="&allow_insecure=1"
+        local link="tuic://${uuid}:${pwd}@${link_host}:${port}/?udp_relay_mode=native&congestion_control=bbr&alpn=h3&sni=${masq_domain}${ins_param}#VOLSB-TUIC-${i}-${port}"
+        ALL_LINKS+=("$link")
+        cat >> "$SB_INFO" <<INFO
+  [TUIC #${i}]
+    地址     : ${CONNECT_ADDR}
+    端口     : ${port} (UDP)
+    UUID     : ${uuid}
+    密码     : ${pwd}
+    SNI      : ${masq_domain}
+    跳过验证 : ${insecure}
+    链接     : ${link}
+INFO
+    done
+    users_json+="]"
+
+    local inbound
+    inbound=$(jq -n \
+        --argjson port  "$port" \
+        --argjson users "$users_json" \
+        --arg     cert  "$cert_path" \
+        --arg     key   "$key_path" \
+        '{type:"tuic",tag:"tuic-in",listen:"::",listen_port:$port,
+           users:$users,congestion_control:"bbr",
+           tls:{enabled:true,alpn:["h3"],certificate_path:$cert,key_path:$key}}')
+    ALL_INBOUNDS+=("$inbound")
+    ask_inbound_route_mode "tuic-in" "TUIC" || return 1
+
+    open_port "$port" udp
+    info "✓ TUIC | 端口:$port (UDP) | 用户数:$user_count"
 }
 
 # ────── 协议 5: ShadowTLS v3 + Shadowsocks ──────
@@ -1828,22 +1970,24 @@ BANNER
     printf "  ${C_BOLD}%-5s${NC} %-30s %-10s %s\n" "4)" "Trojan + TLS"             "TCP"   "经典方案,广泛兼容"
     printf "  ${C_BOLD}%-5s${NC} %-30s %-10s %s\n" "5)" "ShadowTLS v3 + SS"        "TCP"   "真实 TLS 握手伪装"
     printf "  ${C_BOLD}%-5s${NC} %-30s %-10s %s\n" "6)" "AnyTLS"                   "TCP"   "TLS伪装,支持 Reality"
+    printf "  ${C_BOLD}%-5s${NC} %-30s %-10s %s\n" "7)" "Shadowsocks"              "TCP/UDP" "经典 SS 节点,直接生成 ss://"
+    printf "  ${C_BOLD}%-5s${NC} %-30s %-10s %s\n" "8)" "TUIC"                     "UDP"   "QUIC 协议,适合弱网"
     printf "  ${C_BOLD}%-5s${NC} %-30s %-10s %s\n" "0)" "全部协议"                 "-"     "同时部署以上所有"
     hr
     echo ""
-    echo -e "  支持多选: ${C_CYAN}1 2${NC}  ${C_CYAN}1 2 4${NC}  ${C_CYAN}0${NC}(全部)"
+    echo -e "  支持多选: ${C_CYAN}1 2${NC}  ${C_CYAN}1 2 4${NC}  ${C_CYAN}7 8${NC}  ${C_CYAN}0${NC}(全部)"
     echo -e "  返回上一级: ${C_CYAN}b${NC}"
     echo ""
     # 支持环境变量 VOLSB_PROTO 跳过交互
     local raw_input="${VOLSB_PROTO:-}"
     if [[ -z "$raw_input" ]]; then
-        ask "请选择协议 [0-6 / b返回]:"; read -r raw_input
+        ask "请选择协议 [0-8 / b返回]:"; read -r raw_input
     else
         info "协议选择 (环境变量): $raw_input"
     fi
     [[ "$raw_input" =~ ^([bBqQ]|back|BACK|返回)$ ]] && { info "已返回上一级"; return 1; }
     [[ -z "$raw_input" ]] && raw_input="1"
-    [[ "$raw_input" == "0" ]] && raw_input="1 2 3 4 5 6"
+    [[ "$raw_input" == "0" ]] && raw_input="1 2 3 4 5 6 7 8"
 
     SELECTED_PROTOS=()
     for n in $raw_input; do
@@ -1854,6 +1998,8 @@ BANNER
             4) SELECTED_PROTOS+=("trojan") ;;
             5) SELECTED_PROTOS+=("shadowtls") ;;
             6) SELECTED_PROTOS+=("anytls") ;;
+            7) SELECTED_PROTOS+=("ss") ;;
+            8) SELECTED_PROTOS+=("tuic") ;;
             *) warn "忽略无效输入: $n" ;;
         esac
     done
@@ -1918,6 +2064,8 @@ assemble_and_write_config() {
             trojan)        deploy_trojan || return 1 ;;
             shadowtls)     deploy_shadowtls || return 1 ;;
             anytls)        deploy_anytls || return 1 ;;
+            ss)            deploy_shadowsocks || return 1 ;;
+            tuic)          deploy_tuic || return 1 ;;
         esac
     done
 
@@ -2005,6 +2153,8 @@ append_and_write_config() {
             trojan)        deploy_trojan || return 1 ;;
             shadowtls)     deploy_shadowtls || return 1 ;;
             anytls)        deploy_anytls || return 1 ;;
+            ss)            deploy_shadowsocks || return 1 ;;
+            tuic)          deploy_tuic || return 1 ;;
         esac
     done
 

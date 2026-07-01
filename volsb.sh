@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.4.40
+#   版本   : 1.4.41
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS / SS / TUIC
@@ -16,7 +16,7 @@ set -uo pipefail
 # ──────────────────────── 颜色 & 输出 ────────────────────────
 C_RED='\033[0;31m'; C_GREEN='\033[0;32m'; C_YELLOW='\033[1;33m'
 # shellcheck disable=SC2034
-C_BLUE='\033[0;34m'; C_CYAN='\033[0;36m'; C_MAGENTA='\033[0;35m'
+C_BLUE='\033[0;34m'; C_CYAN='\033[0;36m'
 C_BOLD='\033[1m'; C_DIM='\033[2m'; NC='\033[0m'
 
 info()    { echo -e "${C_GREEN}[✓]${NC} $*"; }
@@ -30,7 +30,7 @@ banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 is_back_choice() { [[ "${1:-}" =~ ^([bBqQ]|back|BACK|返回)$ ]]; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.4.40"
+VOLSB_VER="1.4.41"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 SING_BOX_VER="1.13.13"
 
@@ -571,7 +571,6 @@ delete_existing_cert() {
 # 全局:存放当前安装的所有入站 JSON 片段
 declare -a ALL_INBOUNDS=()
 declare -a ALL_LINKS=()
-ROUTE_PROFILE="direct"
 ROUTE_HOME_ADDR=""
 ROUTE_HOME_PORT=""
 ROUTE_HOME_METHOD=""
@@ -1391,7 +1390,6 @@ _ai_domains_json() {
 }
 
 reset_route_profile() {
-    ROUTE_PROFILE="mixed"
     ROUTE_HOME_ADDR=""; ROUTE_HOME_PORT=""; ROUTE_HOME_METHOD=""; ROUTE_HOME_PASS=""
     ROUTE_AI_ADDR=""; ROUTE_AI_PORT=""; ROUTE_AI_METHOD=""; ROUTE_AI_PASS=""
     ROUTE_AI_TAG="ss-ai"
@@ -1978,8 +1976,9 @@ deploy_anytls() {
         local reality_info=""
         if [[ "$tls_mode" == "reality" ]]; then
             local client_server="$link_addr"
-            [[ "$client_server" == \[*\] && "$client_server" == *\] ]] && client_server="${client_server#[}"
-            client_server="${client_server%]}"
+            case "$client_server" in
+                \[*\]) client_server="${client_server#[}"; client_server="${client_server%]}" ;;
+            esac
             local client_json
             client_json=$(jq -n \
                 --arg tag "VOLSB-AnyTLS-${i}" \
@@ -2708,12 +2707,6 @@ HDR
     }
 
     # ── Step 0: 时间偏差预检 ──
-    local ntp_offset=""
-    if command -v chronyc &>/dev/null; then
-        ntp_offset=$(chronyc tracking 2>/dev/null | awk '/System time/{print $4}') || true
-    elif command -v timedatectl &>/dev/null; then
-        ntp_offset=$(timedatectl show 2>/dev/null | grep NTPSynchronized | cut -d= -f2) || true
-    fi
     # 用 HTTP 时间头做快速偏差检测
     local http_ts local_ts offset_sec
     http_ts=$(curl -fsSI --max-time 4 "https://www.cloudflare.com" 2>/dev/null         | grep -i "^date:" | sed "s/^[Dd]ate: //" | tr -d "
@@ -3111,6 +3104,12 @@ HDR
                     split(ports, arr, / /)
                     for (i in arr) if (arr[i] != "") port_map[arr[i]] = 1
                 }
+                function is_route_header(line) {
+                    return line ~ /^  \[(出口系统|分流系统)\]/
+                }
+                function is_block_header(line) {
+                    return line ~ /^  \[/
+                }
                 function has_port(block,    p) {
                     for (p in port_map) {
                         if (block ~ ("端口[[:space:]]*:[[:space:]]*" p "([^0-9]|$)")) return 1
@@ -3118,25 +3117,49 @@ HDR
                     }
                     return 0
                 }
-                function flush() {
-                    if (block == "") return
-                    if (keep_block) printf "%s", block
-                    block = ""
-                    keep_block = 0
-                }
-                /^  \[/ {
-                    flush()
-                    block = $0 ORS
-                    keep_block = 1
-                    if ($0 !~ /^  \[(出口系统|分流系统)\]/) {
-                        if (!has_port(block)) keep_block = 0
+                function print_node() {
+                    if (node_block == "") return
+                    if (has_port(node_block)) {
+                        print node_block
+                        if (route_block != "") print route_block
                     }
-                    next
+                    node_block = ""
+                    route_block = ""
+                }
+                function flush_block() {
+                    if (block == "") return
+                    if (block_type == "route") {
+                        if (node_block != "") {
+                            route_block = block
+                        } else {
+                            pending_route = block
+                        }
+                    } else {
+                        print_node()
+                        node_block = block
+                        route_block = pending_route
+                        pending_route = ""
+                    }
+                    block = ""
+                    block_type = ""
                 }
                 {
-                    block = block $0 ORS
+                    if (is_block_header($0)) {
+                        flush_block()
+                        block = $0
+                        block_type = is_route_header($0) ? "route" : "node"
+                        next
+                    }
+                    if (block != "") {
+                        block = block "\n" $0
+                    } else {
+                        print
+                    }
                 }
-                END { flush() }
+                END {
+                    flush_block()
+                    print_node()
+                }
             ' "$SB_INFO" > "$tmp_info"
             format_nodes_info "$tmp_info"
             rm -f "$tmp_info"
@@ -3186,16 +3209,33 @@ count_saved_links() {
 }
 
 collect_share_links() {
-    local links=() link
+    local links=() link link_port active_ports=()
+    if [[ -f "$SB_CONFIG" ]]; then
+        while IFS= read -r link_port; do
+            [[ -n "$link_port" && "$link_port" != "0" ]] && active_ports+=("$link_port")
+        done < <(jq -r '.inbounds[]? | select((.listen // "") != "127.0.0.1") | .listen_port // empty' "$SB_CONFIG" 2>/dev/null)
+    fi
+
+    _append_share_link_if_current() {
+        local candidate="$1" port
+        [[ -n "$candidate" ]] || return 0
+        if [[ ${#active_ports[@]} -gt 0 ]]; then
+            port=$(_share_link_port "$candidate")
+            [[ -n "$port" ]] || return 0
+            _tag_exists_in_list "$port" "${active_ports[@]}" || return 0
+        fi
+        links+=("$candidate")
+    }
+
     if [[ -f "$SB_LINKS" && -s "$SB_LINKS" ]]; then
         while IFS= read -r link; do
-            [[ -n "$link" ]] && links+=("$link")
+            _append_share_link_if_current "$link"
         done < "$SB_LINKS"
     fi
 
     if [[ ${#links[@]} -le 0 && -f "$SB_INFO" ]]; then
         while IFS= read -r link; do
-            [[ -n "$link" ]] && links+=("$link")
+            _append_share_link_if_current "$link"
         done < <(grep -oP '(?<=链接\s*:\s*)(?:vmess|[a-z0-9+.-]+)://.*$' "$SB_INFO" 2>/dev/null || true)
     fi
 

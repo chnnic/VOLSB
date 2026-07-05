@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.4.41
+#   版本   : 1.4.42
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS / SS / TUIC
@@ -30,7 +30,7 @@ banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 is_back_choice() { [[ "${1:-}" =~ ^([bBqQ]|back|BACK|返回)$ ]]; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.4.41"
+VOLSB_VER="1.4.42"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
 SING_BOX_VER="1.13.13"
 
@@ -51,6 +51,8 @@ SB_INFO="${SB_CONF_DIR}/nodes.info"          # 节点明文信息
 SB_LINKS="${SB_CONF_DIR}/links.txt"          # 所有分享链接
 SB_TRAFFIC="${SB_CONF_DIR}/traffic.json"     # 流量统计缓存
 SB_ENV="${SB_CONF_DIR}/volsb.env"            # 持久化运行参数
+VOLSB_LIB_DIR="/usr/local/lib/volsb"
+VOLSB_SCRIPT="${VOLSB_LIB_DIR}/volsb.sh"     # 管理脚本固定落盘路径
 VOLSB_CMD="/usr/local/bin/volsb"             # 快捷命令路径
 VOLSB_PORT_RESERVE_FILE="${TMPDIR:-/tmp}/volsb_ports.$$"
 trap 'rm -f "$VOLSB_PORT_RESERVE_FILE" 2>/dev/null || true' EXIT
@@ -61,6 +63,93 @@ SB_OPENRC="/etc/init.d/sing-box"
 # ──────────────────────── 系统检测 ────────────────────────
 require_root() {
     [[ $EUID -eq 0 ]] || die "请用 root 用户执行  (提示: sudo -i)"
+}
+
+require_commands() {
+    local missing=() cmd
+    for cmd in "$@"; do
+        command -v "$cmd" &>/dev/null || missing+=("$cmd")
+    done
+    [[ ${#missing[@]} -eq 0 ]] || die "缺少依赖: ${missing[*]}，请先安装后重试"
+}
+
+secure_sensitive_files() {
+    chmod 700 "$SB_CONF_DIR" "$SB_CERT_DIR" 2>/dev/null || true
+    chmod 600 "$SB_CONFIG" "$SB_INFO" "$SB_LINKS" "$SB_TRAFFIC" "$SB_ENV" 2>/dev/null || true
+}
+
+valid_port() {
+    local port="${1:-}"
+    [[ "$port" =~ ^[0-9]+$ ]] || return 1
+    (( 10#$port >= 1 && 10#$port <= 65535 ))
+}
+
+normalize_port() {
+    local port="$1"
+    printf '%d' "$((10#$port))"
+}
+
+require_valid_port() {
+    local port="${1:-}" label="${2:-端口}"
+    if ! valid_port "$port"; then
+        err "${label}无效: ${port:-空} (必须是 1-65535 的整数)"
+        return 1
+    fi
+}
+
+current_script_path() {
+    local src="${BASH_SOURCE[0]:-$0}"
+    readlink -f "$src" 2>/dev/null || true
+}
+
+is_ephemeral_script_path() {
+    local path="${1:-}"
+    [[ -z "$path" ]] && return 0
+    [[ "$path" == /dev/fd/* || "$path" == /proc/*/fd/* || "$path" == *"pipe:["* ]] && return 0
+    [[ -f "$path" ]] || return 0
+    return 1
+}
+
+validate_script_file() {
+    local file="$1" first_line
+    first_line=$(head -1 "$file" 2>/dev/null)
+    grep -q "VOLSB_VER=" "$file" 2>/dev/null && [[ "$first_line" == *"bash"* ]]
+}
+
+install_managed_script() {
+    mkdir -p "$VOLSB_LIB_DIR" || return 1
+    chmod 755 "$VOLSB_LIB_DIR" 2>/dev/null || true
+
+    local src tmp
+    src=$(current_script_path)
+    tmp=$(mktemp "${VOLSB_LIB_DIR}/volsb.sh.XXXXXX") || return 1
+
+    if ! is_ephemeral_script_path "$src"; then
+        cp "$src" "$tmp" || { rm -f "$tmp"; return 1; }
+    else
+        curl -fsSL --max-time 60 -o "$tmp" "$VOLSB_REPO" || {
+            rm -f "$tmp"
+            err "无法将脚本落盘到固定路径: $VOLSB_SCRIPT"
+            return 1
+        }
+    fi
+
+    if ! validate_script_file "$tmp"; then
+        rm -f "$tmp"
+        err "脚本内容校验失败，未安装快捷命令"
+        return 1
+    fi
+
+    chmod 755 "$tmp"
+    mv "$tmp" "$VOLSB_SCRIPT"
+}
+
+write_shortcut() {
+    cat > "$VOLSB_CMD" <<SHORTCUT
+#!/usr/bin/env bash
+exec bash "${VOLSB_SCRIPT}" "\$@"
+SHORTCUT
+    chmod 755 "$VOLSB_CMD"
 }
 
 detect_os() {
@@ -138,6 +227,7 @@ install_deps() {
     eval "$PKG_UPDATE" 2>/dev/null || warn "包列表更新失败,继续..."
     # shellcheck disable=SC2086
     eval "$PKG_INSTALL $PKGS" 2>/dev/null || warn "部分依赖安装失败,继续..."
+    require_commands curl tar jq openssl
 }
 
 # ──────────────────────── sing-box 下载安装 ────────────────────────
@@ -161,7 +251,7 @@ install_binary() {
 
 setup_dirs() {
     mkdir -p "$SB_CONF_DIR" "$SB_CERT_DIR" "$SB_LOG_DIR" "$SB_DATA_DIR"
-    chmod 700 "$SB_CERT_DIR"
+    secure_sensitive_files
 }
 
 # ──────────────────────── 服务管理 (systemd / OpenRC) ────────────────────────
@@ -292,7 +382,7 @@ port_is_reserved() {
 
 reserve_port() {
     local port="$1"
-    [[ "$port" =~ ^[0-9]+$ ]] || return 0
+    valid_port "$port" || return 0
     port_is_reserved "$port" && return 0
     printf '%s\n' "$port" >> "$VOLSB_PORT_RESERVE_FILE"
 }
@@ -337,6 +427,7 @@ EOF
 
 open_port() {
     local port="$1" proto="${2:-tcp}"
+    valid_port "$port" || { warn "跳过放行无效端口: ${port:-空}"; return 0; }
     command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "active" && \
         ufw allow "${port}/${proto}" &>/dev/null || true
     command -v firewall-cmd &>/dev/null && \
@@ -357,6 +448,12 @@ print_qr() {
     echo "$1" | qrencode -t ANSIUTF8 2>/dev/null || true
 }
 
+tcp_connect_test() {
+    local host="$1" port="$2"
+    valid_port "$port" || return 1
+    timeout 5 bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$host" "$port" 2>/dev/null
+}
+
 share_link_proto() {
     local link="$1"
     echo "${link%%://*}" | tr '[:lower:]' '[:upper:]'
@@ -368,7 +465,12 @@ share_link_name() {
     [[ -n "$name" ]] && printf '%s' "$name" || printf '%s' "$fallback"
 }
 
-save_env() { declare -p "$1" >> "$SB_ENV" 2>/dev/null || true; }
+save_env() {
+    mkdir -p "$SB_CONF_DIR" 2>/dev/null || true
+    touch "$SB_ENV" 2>/dev/null || true
+    chmod 600 "$SB_ENV" 2>/dev/null || true
+    declare -p "$1" >> "$SB_ENV" 2>/dev/null || true
+}
 
 load_env() {
     # shellcheck disable=SC1090
@@ -393,15 +495,18 @@ acme_install_cert() {
     local domain="$1"
     local crt="${SB_CERT_DIR}/${domain}.crt"
     local key="${SB_CERT_DIR}/${domain}.key"
+    local reload_cmd="$VOLSB_CMD restart"
     if ! acme_has_domain "$domain"; then
         err "acme.sh 中未找到完整证书: $domain"
         return 1
     fi
+    [[ -x "$VOLSB_CMD" ]] || reload_cmd="$(command -v bash) ${VOLSB_SCRIPT} restart"
     ~/.acme.sh/acme.sh --install-cert -d "$domain" --ecc \
         --fullchain-file "$crt" --key-file "$key" \
-        --reloadcmd "$(command -v bash) $(readlink -f "$0") restart" \
+        --reloadcmd "$reload_cmd" \
         || { err "证书安装失败 — 请确认: ① 域名已解析到本机 ② 80端口未被占用 ③ acme.sh 中已有该域名证书"; return 1; }
     [[ -s "$crt" && -s "$key" ]] || { err "证书文件不完整: $crt / $key"; return 1; }
+    chmod 600 "$key" 2>/dev/null || true
     info "证书已安装(fullchain): $crt"
 }
 
@@ -793,6 +898,8 @@ deploy_vless_reality() {
         ask "监听端口 (回车随机):"; read -r port
         [[ -z "$port" ]] && port=$(random_port)
     fi
+    require_valid_port "$port" "监听端口" || return 1
+    port=$(normalize_port "$port")
     reserve_port "$port"
 
     if [[ -n "${VOLSB_SNI:-}" ]]; then
@@ -870,6 +977,8 @@ deploy_hysteria2() {
 
     local port; ask "监听端口 (回车随机):"; read -r port
     [[ -z "$port" ]] && port=$(random_port)
+    require_valid_port "$port" "监听端口" || return 1
+    port=$(normalize_port "$port")
     reserve_port "$port"
 
     select_tls_cert_mode "TLS 证书" || return 1
@@ -923,6 +1032,8 @@ deploy_shadowsocks() {
 
     local base_port; ask "监听端口 (回车随机):"; read -r base_port
     [[ -z "$base_port" ]] && base_port=$(random_port)
+    require_valid_port "$base_port" "监听端口" || return 1
+    base_port=$(normalize_port "$base_port")
     reserve_port "$base_port"
 
     ask_multi_user_count; local user_count="$USER_COUNT"
@@ -997,6 +1108,8 @@ deploy_vmess_ws() {
     step "配置 VMess + WebSocket"
     local port ws_path
     ask "监听端口 (回车随机, 建议80):"; read -r port; [[ -z "$port" ]] && port=$(random_port)
+    require_valid_port "$port" "监听端口" || return 1
+    port=$(normalize_port "$port")
     reserve_port "$port"
     ask "WebSocket 路径 (回车随机):"; read -r ws_path
     [[ -z "$ws_path" ]] && ws_path="/$(gen_rand_hex 6)"
@@ -1042,6 +1155,8 @@ INFO
 deploy_trojan() {
     step "配置 Trojan + TLS"
     local port; ask "监听端口 (回车默认443):"; read -r port; [[ -z "$port" ]] && port=443
+    require_valid_port "$port" "监听端口" || return 1
+    port=$(normalize_port "$port")
     reserve_port "$port"
     select_tls_cert_mode "TLS 证书" || return 1
     local masq_domain="$SELECTED_TLS_DOMAIN"
@@ -1093,6 +1208,8 @@ deploy_tuic() {
 
     local port; ask "监听端口 (回车随机):"; read -r port
     [[ -z "$port" ]] && port=$(random_port)
+    require_valid_port "$port" "监听端口" || return 1
+    port=$(normalize_port "$port")
     reserve_port "$port"
 
     select_tls_cert_mode "TLS 证书" || return 1
@@ -1150,11 +1267,14 @@ deploy_shadowtls() {
     local stls_port sni
     ask "ShadowTLS 监听端口 (回车随机):"; read -r stls_port
     [[ -z "$stls_port" ]] && stls_port=$(random_port)
+    require_valid_port "$stls_port" "ShadowTLS 监听端口" || return 1
+    stls_port=$(normalize_port "$stls_port")
     reserve_port "$stls_port"
     echo "  推荐 SNI: www.bing.com / www.apple.com / gateway.icloud.com"
     ask "伪装 SNI [默认 www.bing.com]:"; read -r sni; [[ -z "$sni" ]] && sni="www.bing.com"
 
     local ss_port; ss_port=$(random_port)
+    require_valid_port "$ss_port" "Shadowsocks 内层端口" || return 1
     reserve_port "$ss_port"
     ask_multi_user_count; local user_count="$USER_COUNT"
     local stls_users="["; local ss_users="["; local idx=0
@@ -1243,6 +1363,8 @@ _parse_ss_link() {
         err "SS 链接解析失败: addr=${LAND_ADDR} port=${LAND_PORT} method=${LAND_METHOD}"
         return 1
     fi
+    require_valid_port "$LAND_PORT" "SS 链接端口" || return 1
+    LAND_PORT=$(normalize_port "$LAND_PORT")
     info "解析成功: ${LAND_METHOD} @ ${LAND_ADDR}:${LAND_PORT}"
 }
 
@@ -1257,11 +1379,8 @@ _parse_ss_link_into() {
 
 _ss_outbound_json() {
     local tag="$1" addr="$2" port="$3" method="$4" pass="$5"
-    local port_int; port_int=$(( port + 0 )) 2>/dev/null || port_int=0
-    if [[ $port_int -eq 0 ]]; then
-        err "SS 出站端口无效: ${port}"
-        return 1
-    fi
+    require_valid_port "$port" "SS 出站端口" || return 1
+    local port_int; port_int=$(normalize_port "$port")
     jq -n \
         --arg tag "$tag" \
         --arg server "$addr" \
@@ -1714,6 +1833,7 @@ deploy_relay() {
 ==============================================
 INFOHEADER
     : > "$SB_LINKS"
+    secure_sensitive_files
 
     # ── 落地机信息 ──
     banner "落地机 (Shadowsocks) 信息"
@@ -1756,6 +1876,8 @@ INFOHEADER
         [[ -z "$LAND_ADDR" ]] && { err "落地机地址不能为空"; return 1; }
         ask "落地机 SS 端口:"; read -r LAND_PORT
         [[ -z "$LAND_PORT" ]] && { err "落地机端口不能为空"; return 1; }
+        require_valid_port "$LAND_PORT" "落地机 SS 端口" || return 1
+        LAND_PORT=$(normalize_port "$LAND_PORT")
         ask "落地机 SS 密码:"; read -r LAND_PASS
         [[ -z "$LAND_PASS" ]] && { err "落地机密码不能为空"; return 1; }
         echo "  加密方式:  1) 2022-blake3-aes-128-gcm (推荐)  2) aes-256-gcm  3) chacha20-ietf-poly1305"
@@ -1773,6 +1895,8 @@ INFOHEADER
 
     local in_port sni
     ask "入站端口 (回车随机):"; read -r in_port; [[ -z "$in_port" ]] && in_port=$(random_port)
+    require_valid_port "$in_port" "入站端口" || return 1
+    in_port=$(normalize_port "$in_port")
     reserve_port "$in_port"
     echo "  SNI 推荐: www.cloudflare.com / www.microsoft.com"
     ask "伪装 SNI [默认 www.cloudflare.com]:"; read -r sni; [[ -z "$sni" ]] && sni="www.cloudflare.com"
@@ -1808,15 +1932,15 @@ INFO
     users_json+="]"; short_ids+="]"
 
     # ── 写入配置 ──
-    mkdir -p "$SB_CONF_DIR"
+    mkdir -p "$SB_CONF_DIR" || return 1
+    secure_sensitive_files
 
     # LAND_PORT 必须是纯整数
-    local land_port_int; land_port_int=$(( LAND_PORT + 0 )) 2>/dev/null || land_port_int=0
-    if [[ $land_port_int -eq 0 ]]; then
-        err "落地机端口无效: ${LAND_PORT}"; return 1
-    fi
+    require_valid_port "$LAND_PORT" "落地机端口" || return 1
+    local land_port_int; land_port_int=$(normalize_port "$LAND_PORT")
 
-    cat > "$SB_CONFIG" <<JSON
+    local tmp_config; tmp_config=$(mktemp "${SB_CONF_DIR}/config.json.XXXXXX") || return 1
+    cat > "$tmp_config" <<JSON
 {
   "log": {"level": "warn", "output": "${SB_LOG}", "timestamp": true},
   "inbounds": [
@@ -1863,13 +1987,17 @@ INFO
   }
 }
 JSON
+    chmod 600 "$tmp_config" 2>/dev/null || true
 
     # 校验配置
-    if ! "$SB_BIN" check -c "$SB_CONFIG" 2>/dev/null; then
+    if ! "$SB_BIN" check -c "$tmp_config" 2>/dev/null; then
         err "线路机配置校验失败:"
-        "$SB_BIN" check -c "$SB_CONFIG"
+        "$SB_BIN" check -c "$tmp_config"
+        rm -f "$tmp_config"
         return 1
     fi
+    mv "$tmp_config" "$SB_CONFIG"
+    secure_sensitive_files
 
     open_port "$in_port" tcp
     info "✓ 线路机配置完成 | 入站端口:$in_port → 落地:${LAND_ADDR}:${land_port_int}"
@@ -1905,6 +2033,8 @@ deploy_anytls() {
         ask "监听端口 (回车随机):"; read -r port
         [[ -z "$port" ]] && port=$(random_port)
     fi
+    require_valid_port "$port" "监听端口" || return 1
+    port=$(normalize_port "$port")
     reserve_port "$port"
 
     echo "  TLS 模式:"
@@ -2104,7 +2234,9 @@ _write_config() {
     build_route_profile_json || return 1
     merge_route_profile_json || return 1
     step "写入配置文件"
-    cat > "$SB_CONFIG" <<JSON
+    mkdir -p "$SB_CONF_DIR" || return 1
+    local tmp_config; tmp_config=$(mktemp "${SB_CONF_DIR}/config.json.XXXXXX") || return 1
+    cat > "$tmp_config" <<JSON
 {
   "log": {
     "level": "warn",
@@ -2116,17 +2248,21 @@ _write_config() {
   "route": ${ROUTE_CONFIG_JSON}
 }
 JSON
+    chmod 600 "$tmp_config" 2>/dev/null || true
     # 先注入统计 API，再做最终校验，避免校验后又改动配置。
-    traffic_init_api || return 1
-    if "$SB_BIN" check -c "$SB_CONFIG" 2>/dev/null; then
+    traffic_init_api "$tmp_config" || { rm -f "$tmp_config"; return 1; }
+    if "$SB_BIN" check -c "$tmp_config" 2>/dev/null; then
+        mv "$tmp_config" "$SB_CONFIG"
+        secure_sensitive_files
         info "配置写入完成，校验通过"
     else
-        err "配置校验失败:"; "$SB_BIN" check -c "$SB_CONFIG"; return 1
+        err "配置校验失败:"; "$SB_BIN" check -c "$tmp_config"; rm -f "$tmp_config"; return 1
     fi
 }
 
 # ────── 初始化节点信息头 ──────
 _init_info_header() {
+    mkdir -p "$SB_CONF_DIR" || return 1
     cat > "$SB_INFO" <<INFOHEADER
 ==============================================
   VOLSB — 节点信息
@@ -2135,6 +2271,7 @@ _init_info_header() {
 ==============================================
 INFOHEADER
     : > "$SB_LINKS"   # 清空链接文件
+    secure_sensitive_files
 }
 
 # ────── 全新安装：覆盖所有入站 ──────
@@ -2164,6 +2301,7 @@ assemble_and_write_config() {
     _write_config "$joined" || return 1
     printf '%s
 ' "${ALL_LINKS[@]}" > "$SB_LINKS"
+    secure_sensitive_files
 }
 
 # ────── 追加协议：保留旧入站，合并新入站 ──────
@@ -2285,6 +2423,7 @@ append_and_write_config() {
     _write_config "$joined" || return 1
     printf '%s
 ' "${ALL_LINKS[@]}" > "$SB_LINKS"
+    secure_sensitive_files
     info "共 ${#ALL_INBOUNDS[@]} 个入站节点"
 }
 
@@ -2299,16 +2438,17 @@ SB_STAT_API="127.0.0.1:9090"  # sing-box Clash API 监听地址
 
 traffic_init_api() {
     # 幂等修复 Clash 兼容 API（HTTP，用于连接/流量统计）
-    [[ -f "$SB_CONFIG" ]] || return 0
+    local config_path="${1:-$SB_CONFIG}"
+    [[ -f "$config_path" ]] || return 0
 
     local current api_type
-    current=$(jq -r '.experimental.clash_api.external_controller // ""' "$SB_CONFIG" 2>/dev/null || echo "")
-    api_type=$(jq -r '(.experimental.clash_api // empty) | type' "$SB_CONFIG" 2>/dev/null || echo "")
+    current=$(jq -r '.experimental.clash_api.external_controller // ""' "$config_path" 2>/dev/null || echo "")
+    api_type=$(jq -r '(.experimental.clash_api // empty) | type' "$config_path" 2>/dev/null || echo "")
     if [[ "$current" == "$SB_STAT_API" && "$api_type" == "object" ]]; then
         return 0
     fi
 
-    local tmp; tmp=$(mktemp)
+    local tmp; tmp=$(mktemp "${config_path}.api.XXXXXX")
     if ! jq --arg controller "$SB_STAT_API" '
         .experimental = (if (.experimental | type) == "object" then .experimental else {} end)
         | (if (.experimental.clash_api | type) == "object" then .experimental.clash_api else {} end) as $old_api
@@ -2318,11 +2458,12 @@ traffic_init_api() {
                 "secret": ($old_api.secret // "")
             }
         )
-    ' "$SB_CONFIG" > "$tmp"; then
+    ' "$config_path" > "$tmp"; then
         rm -f "$tmp"
         err "Clash API 配置写入失败"
         return 1
     fi
+    chmod 600 "$tmp" 2>/dev/null || true
 
     if [[ -x "$SB_BIN" ]] && ! "$SB_BIN" check -c "$tmp" &>/dev/null; then
         err "注入 Clash API 后配置校验失败，已保留原配置"
@@ -2331,7 +2472,8 @@ traffic_init_api() {
         return 1
     fi
 
-    mv "$tmp" "$SB_CONFIG"
+    mv "$tmp" "$config_path"
+    [[ "$config_path" == "$SB_CONFIG" ]] && secure_sensitive_files
     info "已启用/修复 Clash API (${SB_STAT_API})"
 }
 
@@ -2497,7 +2639,7 @@ HDR
             return 0
         fi
 
-        if [[ "$choice" =~ ^[0-9]+$ ]]; then
+        if [[ "$choice" =~ ^[0-9]+$ ]] && valid_port "$choice"; then
             SELECTED_VERIFY_PORT="$choice"
             SELECTED_VERIFY_TYPE="manual"
             SELECTED_VERIFY_TAG=""
@@ -2570,7 +2712,7 @@ HDR
         echo -e "  ${C_BOLD}出站 ${land_tag}:${NC} ${C_CYAN}${land_addr}:${land_port}${NC} (${land_method})"
 
         echo -n "  TCP 连接 ... "
-        if timeout 5 bash -c "echo >/dev/tcp/${land_addr}/${land_port}" 2>/dev/null; then
+        if tcp_connect_test "$land_addr" "$land_port"; then
             echo -e "${C_GREEN}成功${NC}"; (( pass++ )) || true
         else
             echo -e "${C_RED}失败${NC}"
@@ -2618,12 +2760,12 @@ HDR
         fi
 
         local land_port_int
-        land_port_int=$(( land_port + 0 )) 2>/dev/null || land_port_int=0
-        if [[ $land_port_int -eq 0 ]]; then
+        if ! valid_port "$land_port"; then
             echo -e "  ${C_RED}[✗]${NC} 出站端口无效: ${land_port}"
             (( fail++ )) || true
             return 0
         fi
+        land_port_int=$(normalize_port "$land_port")
 
         local test_port=19876
         while ss -tuln 2>/dev/null | grep -q ":${test_port} "; do
@@ -2972,6 +3114,7 @@ reset_traffic_log() {
     [[ "$ans" =~ ^[Yy]$ ]] || { info "已取消"; return; }
     : > "$SB_LOG" 2>/dev/null && info "日志已清空"
     echo "{}" > "$SB_TRAFFIC"
+    secure_sensitive_files
 }
 
 # ════════════════════════════════════════════════════════════
@@ -2979,12 +3122,8 @@ reset_traffic_log() {
 # ════════════════════════════════════════════════════════════
 
 install_shortcut() {
-    local self; self=$(readlink -f "$0")
-    cat > "$VOLSB_CMD" <<SHORTCUT
-#!/usr/bin/env bash
-exec bash "${self}" "\$@"
-SHORTCUT
-    chmod +x "$VOLSB_CMD"
+    install_managed_script || return 1
+    write_shortcut
     info "快捷命令已安装,现在可以输入 ${C_BOLD}volsb${NC} 进入管理界面"
 }
 
@@ -3647,6 +3786,7 @@ delete_node() {
     fi
 
     mv "$tmp_config" "$SB_CONFIG"
+    secure_sensitive_files
     _clean_links_by_port "$ports_json" || warn "分享链接文件更新失败，已继续"
     _clean_info_blocks_by_port "$ports_json" || warn "节点信息文件更新失败，已继续"
 
@@ -3876,6 +4016,7 @@ reset_ports() {
 
     if "$SB_BIN" check -c "$tmp_config" &>/dev/null; then
         mv "$tmp_config" "$SB_CONFIG"
+        secure_sensitive_files
         _sync_metadata_after_reset "$selected_ports_json" "$port_map_file" "$token_map_file" \
             && info "节点信息和分享链接已同步" \
             || warn "节点信息/分享链接同步失败，请重新生成节点后再导入"
@@ -4017,6 +4158,7 @@ assemble_relay_check() {
     if [[ ${#ALL_LINKS[@]} -gt 0 ]]; then
         printf '%s
 ' "${ALL_LINKS[@]}" > "$SB_LINKS"
+        secure_sensitive_files
         info "已保存 ${#ALL_LINKS[@]} 条节点链接"
     fi
 }
@@ -4078,22 +4220,30 @@ do_update_script() {
 
     info "本地版本: v${VOLSB_VER}  |  远端版本: v${remote_ver}"
 
-    if [[ "$remote_ver" == "$VOLSB_VER" ]]; then
+    local needs_path_repair=false
+    [[ -f "$VOLSB_SCRIPT" ]] || needs_path_repair=true
+    if [[ ! -f "$VOLSB_CMD" ]] || ! grep -q "$VOLSB_SCRIPT" "$VOLSB_CMD" 2>/dev/null; then
+        needs_path_repair=true
+    fi
+
+    if [[ "$remote_ver" == "$VOLSB_VER" && "$needs_path_repair" == "false" ]]; then
         info "VOLSB 已是最新版本 v${VOLSB_VER}"; return 0
     fi
 
-    info "发现新版本: v${VOLSB_VER} → v${remote_ver}"
+    if [[ "$remote_ver" == "$VOLSB_VER" ]]; then
+        info "版本已是最新，将修复脚本落盘路径和快捷命令"
+    else
+        info "发现新版本: v${VOLSB_VER} → v${remote_ver}"
+    fi
     ask "确认更新? [Y/n]:"; read -r _ans
     [[ "$_ans" =~ ^[Nn]$ ]] && { info "已取消"; return 0; }
 
-    # 确定脚本真实路径:
-    # $0 可能是 /usr/local/bin/volsb (wrapper)，需要找到实际脚本
-    local self
-    # 优先用 BASH_SOURCE[0]，它始终指向实际脚本文件
-    self=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null) || self=$(readlink -f "$0")
+    mkdir -p "$VOLSB_LIB_DIR" || return 1
+    chmod 755 "$VOLSB_LIB_DIR" 2>/dev/null || true
+    local self="$VOLSB_SCRIPT"
     info "脚本路径: $self"
 
-    local tmpfile; tmpfile=$(mktemp /tmp/volsb_update.XXXXXX)
+    local tmpfile; tmpfile=$(mktemp "${VOLSB_LIB_DIR}/volsb_update.XXXXXX")
 
     step "下载新版脚本"
     if ! curl -fsSL --max-time 60 -o "$tmpfile" "$VOLSB_REPO"; then
@@ -4102,30 +4252,25 @@ do_update_script() {
     fi
 
     # 完整性校验：必须含 VOLSB_VER= 且第一行是 bash shebang
-    local first_line; first_line=$(head -1 "$tmpfile" 2>/dev/null)
-    if ! grep -q "VOLSB_VER=" "$tmpfile" 2>/dev/null         || [[ "$first_line" != *"bash"* ]]; then
+    if ! validate_script_file "$tmpfile"; then
         rm -f "$tmpfile"
         err "下载内容校验失败,中止更新"; return 1
     fi
 
     # 备份当前版本
     local backup="${self}.bak.${VOLSB_VER}"
-    cp "$self" "$backup" && info "已备份至: $backup"
+    if [[ -f "$self" ]]; then
+        cp "$self" "$backup" && info "已备份至: $backup"
+    fi
 
     # 原子替换：先写临时文件再 mv，避免写到一半进程读取
-    chmod +x "$tmpfile"
+    chmod 755 "$tmpfile"
     mv "$tmpfile" "$self"
     info "脚本已替换: $self"
 
     # 同步更新 /usr/local/bin/volsb wrapper（重写指向 self）
-    if [[ -f "$VOLSB_CMD" && "$VOLSB_CMD" != "$self" ]]; then
-        cat > "$VOLSB_CMD" <<SHORTCUT
-#!/usr/bin/env bash
-exec bash "${self}" "\$@"
-SHORTCUT
-        chmod +x "$VOLSB_CMD"
-        info "快捷命令已同步: $VOLSB_CMD"
-    fi
+    write_shortcut
+    info "快捷命令已同步: $VOLSB_CMD"
 
     echo ""
     info "VOLSB 更新完成: v${VOLSB_VER} → v${remote_ver} ✔"
@@ -4133,7 +4278,7 @@ SHORTCUT
     info "正在重新加载新版本..."
     sleep 1
     # exec 替换当前进程，直接进入新版本菜单，无需用户手动退出重进
-    exec bash "$self" menu
+    exec bash "$VOLSB_SCRIPT" menu
 }
 
 # ────── 统一更新入口(菜单调用) ──────
@@ -4338,6 +4483,7 @@ main() {
   安装时间 : $(date '+%Y-%m-%d %H:%M:%S')
 ==============================================
 HDR
+            secure_sensitive_files
             parse_relay_args "$@"
             ask_connect_addr || exit 0
             deploy_relay || exit 1

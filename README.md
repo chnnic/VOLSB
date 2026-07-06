@@ -11,9 +11,9 @@
     ╚═══╝   ╚═════╝ ╚══════╝╚══════╝╚═════╝
 ```
 
-[![Version](https://img.shields.io/badge/version-1.4.43-blue.svg)](https://github.com/chnnic/VOLSB)
+[![Version](https://img.shields.io/badge/version-1.4.44-blue.svg)](https://github.com/chnnic/VOLSB)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![sing-box](https://img.shields.io/badge/sing--box-1.13.13-orange.svg)](https://github.com/SagerNet/sing-box)
+[![sing-box](https://img.shields.io/badge/sing--box-1.13.14-orange.svg)](https://github.com/SagerNet/sing-box)
 
 ---
 
@@ -29,7 +29,7 @@ VOLSB 是一个功能完整的 **sing-box 服务端** 一键部署脚本，支�
 
 | 功能 | 说明 |
 |------|------|
-| 一键安装 | 自动下载并固定 sing-box 1.13.13 后部署 |
+| 一键安装 | 自动下载并固定 sing-box 1.13.14 后部署 |
 | 多协议支持 | VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS v3 / AnyTLS / Shadowsocks / TUIC |
 | 证书复用 | Hysteria2 / Trojan / AnyTLS / TUIC 支持复用已有证书、自签证书或 Let's Encrypt 正式证书 |
 | 多节点生成 | 每个协议支持同时生成 1-10 个节点（独立 UUID/密码） |
@@ -121,10 +121,10 @@ volsb uninstall      # 完全卸载
 ```
   ██╗   ██╗ ██████╗ ██╗     ███████╗██████╗
   ...
-  v1.4.43  |  2026-07-01 00:00:00
+  v1.4.44  |  2026-07-01 00:00:00
 
   状态: ● 运行中
-  版本: 1.13.13
+  版本: 1.13.14
   节点: 3 个入站 / 6 条链接
   ────────────────────────────────────────────
   📦 安装管理

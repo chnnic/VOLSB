@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #   VOLSB — sing-box 服务端一键部署与管理脚本
-#   版本   : 1.4.42
+#   版本   : 1.4.43
 #   项目   : https://github.com/chnnic/VOLSB
 #   模式   : 部署机(落地机) / 线路机(中转机)
 #   协议   : VLESS+Reality / Hysteria2 / VMess-WS / Trojan / ShadowTLS / AnyTLS / SS / TUIC
@@ -30,8 +30,9 @@ banner()  { echo -e "\n${C_BOLD}${C_BLUE}  $*${NC}"; }
 is_back_choice() { [[ "${1:-}" =~ ^([bBqQ]|back|BACK|返回)$ ]]; }
 
 # ──────────────────────── 全局路径 ────────────────────────
-VOLSB_VER="1.4.42"
+VOLSB_VER="1.4.43"
 VOLSB_REPO="https://raw.githubusercontent.com/chnnic/VOLSB/refs/heads/main/volsb.sh"
+REALITY_SNI_CHECK_REPO="https://raw.githubusercontent.com/chnnic/Reality-SNI-Check/main/Reality-SNI-Check.sh"
 SING_BOX_VER="1.13.13"
 
 # ── 环境变量支持 (方便 CI / 自动化部署) ──
@@ -53,6 +54,7 @@ SB_TRAFFIC="${SB_CONF_DIR}/traffic.json"     # 流量统计缓存
 SB_ENV="${SB_CONF_DIR}/volsb.env"            # 持久化运行参数
 VOLSB_LIB_DIR="/usr/local/lib/volsb"
 VOLSB_SCRIPT="${VOLSB_LIB_DIR}/volsb.sh"     # 管理脚本固定落盘路径
+REALITY_SNI_CHECK_SCRIPT="${VOLSB_LIB_DIR}/Reality-SNI-Check.sh"
 VOLSB_CMD="/usr/local/bin/volsb"             # 快捷命令路径
 VOLSB_PORT_RESERVE_FILE="${TMPDIR:-/tmp}/volsb_ports.$$"
 trap 'rm -f "$VOLSB_PORT_RESERVE_FILE" 2>/dev/null || true' EXIT
@@ -150,6 +152,55 @@ write_shortcut() {
 exec bash "${VOLSB_SCRIPT}" "\$@"
 SHORTCUT
     chmod 755 "$VOLSB_CMD"
+}
+
+validate_reality_sni_check_file() {
+    local file="$1" first_line
+    first_line=$(head -1 "$file" 2>/dev/null)
+    grep -q "Reality dest/SNI" "$file" 2>/dev/null && [[ "$first_line" == *"bash"* ]]
+}
+
+ensure_reality_sni_check() {
+    local target="$REALITY_SNI_CHECK_SCRIPT"
+    if [[ $EUID -ne 0 ]]; then
+        target="${TMPDIR:-/tmp}/Reality-SNI-Check.${UID:-user}.sh"
+    else
+        mkdir -p "$VOLSB_LIB_DIR" || return 1
+        chmod 755 "$VOLSB_LIB_DIR" 2>/dev/null || true
+    fi
+
+    if [[ ! -s "$target" || "${1:-}" == "--update" ]]; then
+        local tmp; tmp=$(mktemp "${target}.XXXXXX") || return 1
+        curl -fsSL --max-time 60 -o "$tmp" "$REALITY_SNI_CHECK_REPO" || {
+            rm -f "$tmp"
+            err "Reality SNI 检测器下载失败: $REALITY_SNI_CHECK_REPO"
+            return 1
+        }
+        if ! validate_reality_sni_check_file "$tmp"; then
+            rm -f "$tmp"
+            err "Reality SNI 检测器内容校验失败"
+            return 1
+        fi
+        chmod 755 "$tmp"
+        mv "$tmp" "$target"
+    fi
+
+    REALITY_SNI_CHECK_ACTIVE="$target"
+}
+
+run_reality_sni_check() {
+    require_commands curl openssl timeout
+    local force_update=false
+    if [[ "${1:-}" == "--update" ]]; then
+        force_update=true
+        shift
+    fi
+    if $force_update; then
+        ensure_reality_sni_check --update || return 1
+    else
+        ensure_reality_sni_check || return 1
+    fi
+    bash "$REALITY_SNI_CHECK_ACTIVE" "$@"
 }
 
 detect_os() {
@@ -886,6 +937,28 @@ ask_multi_user_count() {
     USER_COUNT="$_cnt"
 }
 
+REALITY_SNI_VALUE=""
+ask_reality_sni() {
+    local default_sni="${1:-www.cloudflare.com}" prompt_label="${2:-输入 SNI}" choice
+    while true; do
+        echo ""
+        echo "  Reality SNI 用于伪装 TLS 握手，建议先在落地机实测:"
+        echo "  推荐: www.cloudflare.com / www.apple.com / www.icloud.com / gateway.icloud.com"
+        echo "  输入 c 可运行 Reality-SNI-Check 检测推荐站点"
+        ask "${prompt_label} [默认 ${default_sni}, c=检测推荐]:"
+        read -r choice
+        if [[ "$choice" =~ ^([cC]|check|CHECK)$ ]]; then
+            run_reality_sni_check || warn "Reality SNI 检测未完成"
+            echo ""
+            info "检测结束后可复制推荐的 dest/SNI 粘贴到这里"
+            continue
+        fi
+        [[ -z "$choice" ]] && choice="$default_sni"
+        REALITY_SNI_VALUE="$choice"
+        return 0
+    done
+}
+
 # ────── 协议 1: VLESS + XTLS-Reality ──────
 deploy_vless_reality() {
     step "配置 VLESS + XTLS-Reality"
@@ -905,11 +978,8 @@ deploy_vless_reality() {
     if [[ -n "${VOLSB_SNI:-}" ]]; then
         sni="$VOLSB_SNI"; info "SNI (环境变量): $sni"
     else
-        echo ""
-        echo "  SNI 用于伪装 TLS 握手,建议选目标国大型网站:"
-        echo "  推荐: www.cloudflare.com / www.microsoft.com / www.apple.com / www.icloud.com"
-        ask "输入 SNI [默认 www.cloudflare.com]:"; read -r sni
-        [[ -z "$sni" ]] && sni="www.cloudflare.com"
+        ask_reality_sni "www.cloudflare.com" "输入 SNI" || return 1
+        sni="$REALITY_SNI_VALUE"
     fi
 
     # 生成 Reality 密钥对
@@ -1898,8 +1968,8 @@ INFOHEADER
     require_valid_port "$in_port" "入站端口" || return 1
     in_port=$(normalize_port "$in_port")
     reserve_port "$in_port"
-    echo "  SNI 推荐: www.cloudflare.com / www.microsoft.com"
-    ask "伪装 SNI [默认 www.cloudflare.com]:"; read -r sni; [[ -z "$sni" ]] && sni="www.cloudflare.com"
+    ask_reality_sni "www.cloudflare.com" "伪装 SNI" || return 1
+    sni="$REALITY_SNI_VALUE"
 
     local keypair; keypair=$("$SB_BIN" generate reality-keypair)
     local priv_key; priv_key=$(echo "$keypair" | awk '/PrivateKey/{print $2}')
@@ -2052,11 +2122,8 @@ deploy_anytls() {
     if [[ "$cchoice" == "4" ]]; then
         tls_mode="reality"
         insecure="false"
-        echo ""
-        echo "  Reality SNI 用于伪装 TLS 握手,建议选目标国大型网站:"
-        echo "  推荐: www.cloudflare.com / www.microsoft.com / www.apple.com / www.icloud.com"
-        ask "输入 SNI [默认 www.cloudflare.com]:"; read -r masq_domain
-        [[ -z "$masq_domain" ]] && masq_domain="www.cloudflare.com"
+        ask_reality_sni "www.cloudflare.com" "输入 SNI" || return 1
+        masq_domain="$REALITY_SNI_VALUE"
         local keypair; keypair=$("$SB_BIN" generate reality-keypair)
         reality_priv_key=$(echo "$keypair" | awk '/PrivateKey/{print $2}')
         reality_pub_key=$(echo  "$keypair" | awk '/PublicKey/{print $2}')
@@ -4366,10 +4433,11 @@ LOGO
         echo -e "  ${C_BOLD}🔍 诊断${NC}"
         echo "  15) 验证线路机转发连通性"
         echo "  16) 强制同步系统时间"
+        echo "  17) 检测 Reality SNI 候选"
         hr
         echo "   0) 退出"
         echo ""
-        ask "请选择 [0-16]:"; read -r opt
+        ask "请选择 [0-17]:"; read -r opt
 
         case "$opt" in
             1)  do_install || true ;;
@@ -4413,6 +4481,7 @@ LOGO
             14) [[ -f "$SB_LOG" ]] && tail -f "$SB_LOG" || journalctl -u sing-box -f || true ;;
             15) verify_relay || true ;;
             16) sync_time || true ;;
+            17) run_reality_sni_check || true ;;
             0)  exit 0 ;;
             *)  warn "无效选项: $opt" ;;
         esac
@@ -4450,6 +4519,7 @@ VOLSB — sing-box 服务端部署管理脚本 v${VOLSB_VER}
   log              实时日志
   sync-time        强制同步系统时间
   verify           验证线路机转发连通性
+  check-sni        检测 Reality dest/SNI 候选
   -h, --help       显示帮助
 
 HELP
@@ -4506,6 +4576,7 @@ HDR
         self-update)      do_update_script ;;
         sync-time)        sync_time ;;
         verify)           verify_relay ;;
+        check-sni|sni)    run_reality_sni_check "$@" ;;
         uninstall|remove) detect_os; do_uninstall ;;
         start)            require_root
                           [[ -f /etc/alpine-release ]] && INIT_SYS="openrc" || INIT_SYS="systemd"

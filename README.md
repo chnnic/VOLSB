@@ -11,7 +11,7 @@
     ╚═══╝   ╚═════╝ ╚══════╝╚══════╝╚═════╝
 ```
 
-[![Version](https://img.shields.io/badge/version-1.4.42-blue.svg)](https://github.com/chnnic/VOLSB)
+[![Version](https://img.shields.io/badge/version-1.4.43-blue.svg)](https://github.com/chnnic/VOLSB)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![sing-box](https://img.shields.io/badge/sing--box-1.13.13-orange.svg)](https://github.com/SagerNet/sing-box)
 
@@ -69,6 +69,7 @@ VOLSB 是一个功能完整的 **sing-box 服务端** 一键部署脚本，支�
 | 返回逻辑 | 子菜单支持 `0` 或 `b` 返回上一级，协议选择保留 `0=全部协议`、使用 `b` 返回 |
 | 端口重置 | 支持按节点单选/多选重置端口、密码/UUID，并同步更新分享链接和节点信息 |
 | 端口池 | 同一轮部署/追加/重置会保留已分配随机端口，避免批量生成时撞端口 |
+| Reality SNI 检测 | 集成 Reality-SNI-Check，可在落地机上检测 TLS1.3 / h2 / X25519 / 证书链并推荐 SNI |
 | 流量统计 | Clash API 实时速率 + 按入站端口统计连接数 + 网卡累计流量兜底 |
 | 时间同步 | 四级兜底强制同步系统时间（NTP/chrony/ntpdate/HTTP） |
 | 卸载清理 | 完整移除 sing-box 及所有配置文件 |
@@ -109,6 +110,7 @@ volsb traffic        # 查看流量统计
 volsb log            # 实时日志
 volsb sync-time      # 强制同步系统时间
 volsb verify         # 验证线路机转发连通性
+volsb check-sni      # 检测 Reality dest/SNI 候选
 volsb uninstall      # 完全卸载
 ```
 
@@ -119,7 +121,7 @@ volsb uninstall      # 完全卸载
 ```
   ██╗   ██╗ ██████╗ ██╗     ███████╗██████╗
   ...
-  v1.4.42  |  2026-07-01 00:00:00
+  v1.4.43  |  2026-07-01 00:00:00
 
   状态: ● 运行中
   版本: 1.13.13
@@ -147,6 +149,7 @@ volsb uninstall      # 完全卸载
   🔍 诊断
   15) 验证线路机转发连通性
   16) 强制同步系统时间
+  17) 检测 Reality SNI 候选
   ────────────────────────────────────────────
    0) 退出
 ```
@@ -165,6 +168,22 @@ volsb uninstall      # 完全卸载
 | 6 | AnyTLS | TCP | 支持自签 / Let's Encrypt / Reality |
 | 7 | Shadowsocks | TCP/UDP | 直接生成 `ss://` 分享链接 |
 | 8 | TUIC | UDP | QUIC 协议，适合弱网 |
+
+---
+
+## Reality SNI 检测
+
+VLESS-Reality / AnyTLS-Reality 选择 SNI 时，可先在落地机运行：
+
+```bash
+volsb check-sni              # 进入 Reality-SNI-Check 菜单
+volsb check-sni -r jp        # 按地区推荐
+volsb check-sni -c cdn,cloud # 指定分类检测
+```
+
+安装或追加 Reality 节点时，在 SNI 输入处也可以输入 `c` 临时运行检测器，检测结束后把推荐的 `dest/SNI` 粘贴回来。
+
+检测器来自 [Reality-SNI-Check](https://github.com/chnnic/Reality-SNI-Check)，按需下载到 `/usr/local/lib/volsb/Reality-SNI-Check.sh`，只做标准 HTTPS 探测，不修改 sing-box 配置。
 
 ---
 
